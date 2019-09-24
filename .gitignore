@@ -3,3 +3,7 @@
 ################################################################################
 
 /Client/AzureIoT/.vs/AzureIoT
+/Client/AzureIoT/AzureIoT/obj/ARM/Debug
+/Client/AzureIoT/media
+/Client/AzureIoT/Tools
+/Client/AzureIoT/AzureIoT/app_manifest.json
