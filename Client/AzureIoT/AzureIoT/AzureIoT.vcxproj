@@ -25,7 +25,7 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'" Label="Configuration">
     <UseDebugLibraries>true</UseDebugLibraries>
-    <TargetSysroot>2</TargetSysroot>
+    <TargetSysroot>2+Beta1905</TargetSysroot>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'" Label="Configuration">
     <UseDebugLibraries>false</UseDebugLibraries>
@@ -48,8 +48,15 @@
     <ClCompile Include="epoll_timerfd_utilities.c" />
     <ClCompile Include="main.c" />
     <ClCompile Include="parson.c" />
+    <ClCompile Include="RelayClick\relay.c" />
+    <ClCompile Include="SoilSensor\i2cAccess.c" />
+    <ClCompile Include="SoilSensor\SoilMoistureI2cSensor.c" />
     <ClInclude Include="epoll_timerfd_utilities.h" />
+    <ClInclude Include="mt3620_avnet_dev.h" />
     <ClInclude Include="parson.h" />
+    <ClInclude Include="RelayClick\relay.h" />
+    <ClInclude Include="SoilSensor\i2cAccess.h" />
+    <ClInclude Include="SoilSensor\SoilMoistureI2cSensor.h" />
     <UpToDateCheckInput Include="app_manifest.json" />
     <ClInclude Include="mt3620_rdb.h" />
   </ItemGroup>

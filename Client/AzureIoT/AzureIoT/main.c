@@ -25,6 +25,7 @@
 
 // applibs_versions.h defines the API struct versions to use for applibs APIs.
 #include "applibs_versions.h"
+#include <applibs/i2c.h>
 #include <applibs/log.h>
 #include <applibs/networking.h>
 #include <applibs/gpio.h>
@@ -49,6 +50,20 @@ static volatile sig_atomic_t terminationRequired = false;
 
 #include "parson.h" // used to parse Device Twin messages.
 
+#include "mt3620_avnet_dev.h"
+#include "SoilSensor\i2cAccess.h"
+#include "SoilSensor\SoilMoistureI2cSensor.h"
+#include "RelayClick\relay.h"
+
+// File descriptor - initialized to invalid value
+int i2cFd = -1;
+// Default i2c address, update if customized.
+static const I2C_DeviceAddress SoilMoistureI2cDefaultAddress = 0x20;
+
+// Soil Sensor variables
+static uint8_t soil_sensor_version = 0;
+static uint8_t soil_sensor_address = 0;
+
 // Azure IoT Hub/Central defines.
 #define SCOPEID_LENGTH 20
 static char scopeId[SCOPEID_LENGTH]; // ScopeId for the Azure IoT Central application, set in
@@ -61,6 +76,7 @@ static void SendMessageCallback(IOTHUB_CLIENT_CONFIRMATION_RESULT result, void *
 static void TwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsigned char *payload,
                          size_t payloadSize, void *userContextCallback);
 static void TwinReportBoolState(const char *propertyName, bool propertyValue);
+static void TwinReportStringState(const unsigned char* propertyName, const unsigned char* propertyValue);
 static void ReportStatusCallback(int result, void *context);
 static const char *GetReasonString(IOTHUB_CLIENT_CONNECTION_STATUS_REASON reason);
 static const char *getAzureSphereProvisioningResultString(
@@ -91,8 +107,8 @@ static int epollFd = -1;
 
 // Azure IoT poll periods
 static const int AzureIoTDefaultPollPeriodSeconds = 5;
-static const int AzureIoTMinReconnectPeriodSeconds = 60;
-static const int AzureIoTMaxReconnectPeriodSeconds = 10 * 60;
+static const int AzureIoTMinReconnectPeriodSeconds = 10;
+static const int AzureIoTMaxReconnectPeriodSeconds = 10 * 10;
 
 static int azureIoTPollPeriodSeconds = -1;
 
@@ -135,6 +151,25 @@ int main(int argc, char *argv[])
         terminationRequired = true;
     }
 
+	/*const struct timespec sleepTime = { 1, 0 };
+
+	while (true) {
+		if (IsBusy(SoilMoistureI2cDefaultAddress)) {
+			Log_Debug("Soil sensor is busy\n");
+		}
+		else {
+			float soilSensorTemperature = GetTemperature(SoilMoistureI2cDefaultAddress);
+			Log_Debug("Soil sensor temperature: %.1f\n", soilSensorTemperature);
+
+			unsigned int soilSensorCapacitance = GetCapacitance(SoilMoistureI2cDefaultAddress);
+			Log_Debug("Soil sensor capacitance: %u\n", soilSensorCapacitance);
+		}
+
+		GPIO_SetValue(deviceTwinStatusLedGpioFd, GPIO_Value_Low);
+		nanosleep(&sleepTime, NULL);
+		GPIO_SetValue(deviceTwinStatusLedGpioFd, GPIO_Value_High);
+		nanosleep(&sleepTime, NULL);
+	}*/
     // Main loop
     while (!terminationRequired) {
         if (WaitForEventAndCallHandler(epollFd) != 0) {
@@ -232,6 +267,20 @@ static int InitPeripheralsAndHandlers(void)
         return -1;
     }
 
+	// Initialize Soil Sensor
+	Log_Debug("Opening ISU2 I2C\n");
+	i2cFd = I2CMaster_Open(MT3620_ISU2_I2C);
+	I2CMaster_SetBusSpeed(i2cFd, I2C_BUS_SPEED_STANDARD);
+	I2CMaster_SetTimeout(i2cFd, 100);
+	I2CMaster_SetDefaultTargetAddress(i2cFd, SoilMoistureI2cDefaultAddress);
+
+	InitializeSoilSensor(SoilMoistureI2cDefaultAddress, true);
+	soil_sensor_version = GetVersion(SoilMoistureI2cDefaultAddress);
+	Log_Debug("Soil sensor firmware version: %X\n", soil_sensor_version);
+
+	soil_sensor_address = GetAddress(SoilMoistureI2cDefaultAddress);
+	Log_Debug("Soil sensor address: %X\n", soil_sensor_address);
+
     // Set up a timer to poll for button events.
     struct timespec buttonPressCheckPeriod = {0, 1000 * 1000};
     buttonPollTimerFd =
@@ -269,6 +318,7 @@ static void ClosePeripheralsAndHandlers(void)
     CloseFdAndPrintError(sendOrientationButtonGpioFd, "SendOrientationButton");
     CloseFdAndPrintError(deviceTwinStatusLedGpioFd, "StatusLed");
     CloseFdAndPrintError(epollFd, "Epoll");
+	CloseFdAndPrintError(i2cFd, "I2C");
 }
 
 /// <summary>
@@ -281,6 +331,16 @@ static void HubConnectionStatusCallback(IOTHUB_CLIENT_CONNECTION_STATUS result,
 {
     iothubAuthenticated = (result == IOTHUB_CLIENT_CONNECTION_AUTHENTICATED);
     Log_Debug("IoT Hub Authenticated: %s\n", GetReasonString(reason));
+
+	if (iothubAuthenticated)
+	{
+		char soilsensor_version_string[10] = { 0 };
+		char soilsensor_address_string[10] = { 0 };
+		snprintf(soilsensor_version_string, 10, "0x%02X", soil_sensor_version);
+		snprintf(soilsensor_address_string, 10, "0x%02X", soil_sensor_address);
+		TwinReportStringState("soil_sensor_version", soilsensor_version_string);
+		TwinReportStringState("soil_sensor_address", soilsensor_address_string);
+	}
 }
 
 /// <summary>
@@ -516,6 +576,37 @@ static void TwinReportBoolState(const char *propertyName, bool propertyValue)
 }
 
 /// <summary>
+///     Creates and enqueues a report containing the name and value pair of a Device Twin reported
+///     property. The report is not sent immediately, but it is sent on the next invocation of
+///     IoTHubDeviceClient_LL_DoWork().
+/// </summary>
+/// <param name="propertyName">the IoT Hub Device Twin property name</param>
+/// <param name="propertyValue">the IoT Hub Device Twin property value</param>
+static void TwinReportStringState(const unsigned char* propertyName, const unsigned char* propertyValue)
+{
+	if (iothubClientHandle == NULL) {
+		Log_Debug("ERROR: client not initialized\n");
+	}
+	else {
+		static char reportedPropertiesString[40] = { 0 };
+		int len = snprintf(reportedPropertiesString, 40, "{\"%s\":\"%s\"}", propertyName,
+			propertyValue);
+		if (len < 0)
+			return;
+		Log_Debug("Sending IoT Hub Message Reported state: %s\n", reportedPropertiesString);
+		if (IoTHubDeviceClient_LL_SendReportedState(
+			iothubClientHandle, (unsigned char*)reportedPropertiesString,
+			strlen(reportedPropertiesString), ReportStatusCallback, 0) != IOTHUB_CLIENT_OK) {
+			Log_Debug("ERROR: failed to set reported state for '%s'.\n", propertyName);
+		}
+		else {
+			Log_Debug("INFO: Reported state for '%s' to value '%s'.\n", propertyName,
+				propertyValue);
+		}
+	}
+}
+
+/// <summary>
 ///     Callback invoked when the Device Twin reported properties are accepted by IoT Hub.
 /// </summary>
 static void ReportStatusCallback(int result, void *context)
@@ -528,18 +619,33 @@ static void ReportStatusCallback(int result, void *context)
 /// </summary>
 void SendSimulatedTemperature(void)
 {
-    static float temperature = 30.0;
-    float deltaTemp = (float)(rand() % 20) / 20.0f;
-    if (rand() % 2 == 0) {
-        temperature += deltaTemp;
-    } else {
-        temperature -= deltaTemp;
-    }
+	float soilSensorTemperature = -1;
+	unsigned int soilSensorCapacitance = 0;;
 
-    char tempBuffer[20];
-    int len = snprintf(tempBuffer, 20, "%3.2f", temperature);
-    if (len > 0)
-        SendTelemetry("Temperature", tempBuffer);
+	if (IsBusy(SoilMoistureI2cDefaultAddress)) {
+		Log_Debug("Soil sensor is busy\n");
+	}
+	else {
+		soilSensorTemperature = GetTemperature(SoilMoistureI2cDefaultAddress);
+		Log_Debug("Soil sensor temperature: %.1f\n", soilSensorTemperature);
+
+		soilSensorCapacitance = GetCapacitance(SoilMoistureI2cDefaultAddress);
+		Log_Debug("Soil sensor capacitance: %u\n", soilSensorCapacitance);
+	}
+		
+	if (soilSensorTemperature > -1) {
+		char tempBuffer[20];
+		int len = snprintf(tempBuffer, 20, "%3.1f", soilSensorTemperature);
+		if (len > 0)
+			SendTelemetry("Temperature", tempBuffer);
+	}
+
+	if (soilSensorCapacitance > 0) {
+		char tempBuffer[20];
+		int len = snprintf(tempBuffer, 20, "%u", soilSensorCapacitance);
+		if (len > 0)
+			SendTelemetry("Capacitance", tempBuffer);
+	}
 }
 
 /// <summary>
