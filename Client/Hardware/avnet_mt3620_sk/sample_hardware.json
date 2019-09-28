@@ -23,6 +23,8 @@
         {"Name": "SAMPLE_RGBLED_RED", "Type": "Gpio", "Mapping": "AVNET_MT3620_SK_USER_LED_RED", "Comment": "MT3620 SK: User LED RED Channel."},
         {"Name": "SAMPLE_RGBLED_GREEN", "Type": "Gpio", "Mapping": "AVNET_MT3620_SK_USER_LED_GREEN", "Comment": "MT3620 SK: User LED GREEN Channel."},
         {"Name": "SAMPLE_RGBLED_BLUE", "Type": "Gpio", "Mapping": "AVNET_MT3620_SK_USER_LED_BLUE", "Comment": "MT3620 SK: User LED BLUE Channel."},
+        {"Name": "SAMPLE_RELAY_1_CLICK_2", "Type": "Gpio", "Mapping": "AVNET_MT3620_SK_GPIO1", "Comment": "MT3620 SK: Click Module 2 PWM is GPIO 1."},
+        {"Name": "SAMPLE_RELAY_2_CLICK_2", "Type": "Gpio", "Mapping": "AVNET_MT3620_SK_GPIO35", "Comment": "MT3620 SK: Click Module 2 CS is GPIO 35."},
         {"Name": "SAMPLE_UART", "Type": "Uart", "Mapping": "AVNET_MT3620_SK_ISU0_UART", "Comment": "MT3620 SK: Connect SOCKET1 RX (RX) to SOCKET1 TX (TX)."},
         {"Name": "SAMPLE_LSM6DS3_I2C", "Type": "I2cMaster", "Mapping": "AVNET_MT3620_SK_ISU1_I2C", "Comment": "MT3620 SK: Connect external LSM6DS3 to I2C using SOCKET1, pin MISO (SDA) and pin MOSI (SCL)."},
         {"Name": "SAMPLE_LSM6DS3_SPI", "Type": "SpiMaster", "Mapping": "AVNET_MT3620_SK_ISU1_SPI", "Comment": "MT3620 SK: Connect external LSM6DS3 to SPI using SOCKET1, pin MISO (MISO), pin SCK (SCLK), pin MOSI (MOSI) and SOCKET2 pin CS (CSB)."},

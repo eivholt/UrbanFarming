@@ -64,6 +64,15 @@ static const I2C_DeviceAddress SoilMoistureI2cDefaultAddress = 0x20;
 static uint8_t soil_sensor_version = 0;
 static uint8_t soil_sensor_address = 0;
 
+// Relay Click definitions and variables.
+#define MIKROE_PWM  MT3620_GPIO1   //click#1=GPIO0;  click#2=GPIO1
+#define MIKROE_CS   MT3620_GPIO35  //click#1=GPIO34; click#2=GPIO35
+
+static int r1PinFd;  //relay #1
+static GPIO_Value_Type relay1Pin;
+static int r2PinFd;  //relay #2
+static GPIO_Value_Type relay2Pin;
+
 // Azure IoT Hub/Central defines.
 #define SCOPEID_LENGTH 20
 static char scopeId[SCOPEID_LENGTH]; // ScopeId for the Azure IoT Central application, set in
@@ -151,25 +160,6 @@ int main(int argc, char *argv[])
         terminationRequired = true;
     }
 
-	/*const struct timespec sleepTime = { 1, 0 };
-
-	while (true) {
-		if (IsBusy(SoilMoistureI2cDefaultAddress)) {
-			Log_Debug("Soil sensor is busy\n");
-		}
-		else {
-			float soilSensorTemperature = GetTemperature(SoilMoistureI2cDefaultAddress);
-			Log_Debug("Soil sensor temperature: %.1f\n", soilSensorTemperature);
-
-			unsigned int soilSensorCapacitance = GetCapacitance(SoilMoistureI2cDefaultAddress);
-			Log_Debug("Soil sensor capacitance: %u\n", soilSensorCapacitance);
-		}
-
-		GPIO_SetValue(deviceTwinStatusLedGpioFd, GPIO_Value_Low);
-		nanosleep(&sleepTime, NULL);
-		GPIO_SetValue(deviceTwinStatusLedGpioFd, GPIO_Value_High);
-		nanosleep(&sleepTime, NULL);
-	}*/
     // Main loop
     while (!terminationRequired) {
         if (WaitForEventAndCallHandler(epollFd) != 0) {
@@ -280,6 +270,9 @@ static int InitPeripheralsAndHandlers(void)
 
 	soil_sensor_address = GetAddress(SoilMoistureI2cDefaultAddress);
 	Log_Debug("Soil sensor address: %X\n", soil_sensor_address);
+
+	r1PinFd = GPIO_OpenAsOutput(SAMPLE_RELAY_1_CLICK_2, relay1Pin, GPIO_Value_Low);
+	r2PinFd = GPIO_OpenAsOutput(MIKROE_CS, relay2Pin, GPIO_Value_Low);
 
     // Set up a timer to poll for button events.
     struct timespec buttonPressCheckPeriod = {0, 1000 * 1000};
