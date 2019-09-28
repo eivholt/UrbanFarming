@@ -65,13 +65,11 @@ static uint8_t soil_sensor_version = 0;
 static uint8_t soil_sensor_address = 0;
 
 // Relay Click definitions and variables.
-#define MIKROE_PWM  MT3620_GPIO1   //click#1=GPIO0;  click#2=GPIO1
-#define MIKROE_CS   MT3620_GPIO35  //click#1=GPIO34; click#2=GPIO35
-
-static int r1PinFd;  //relay #1
+static int relay1PinFd;  //relay #1
 static GPIO_Value_Type relay1Pin;
-static int r2PinFd;  //relay #2
+static int relay2PinFd;  //relay #2
 static GPIO_Value_Type relay2Pin;
+static RELAY* relaysState;
 
 // Azure IoT Hub/Central defines.
 #define SCOPEID_LENGTH 20
@@ -84,6 +82,8 @@ static bool iothubAuthenticated = false;
 static void SendMessageCallback(IOTHUB_CLIENT_CONFIRMATION_RESULT result, void *context);
 static void TwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsigned char *payload,
                          size_t payloadSize, void *userContextCallback);
+static void SendTelemetryRelay2();
+static void SendTelemetryRelay1();
 static void TwinReportBoolState(const char *propertyName, bool propertyValue);
 static void TwinReportStringState(const unsigned char* propertyName, const unsigned char* propertyValue);
 static void ReportStatusCallback(int result, void *context);
@@ -98,6 +98,7 @@ static void SendSimulatedTemperature(void);
 
 // Initialization/Cleanup
 static int InitPeripheralsAndHandlers(void);
+static void InitializeRelays(void);
 static void ClosePeripheralsAndHandlers(void);
 
 // File descriptors - initialized to invalid value
@@ -120,6 +121,8 @@ static const int AzureIoTMinReconnectPeriodSeconds = 10;
 static const int AzureIoTMaxReconnectPeriodSeconds = 10 * 10;
 
 static int azureIoTPollPeriodSeconds = -1;
+
+static void SetRelayStates(RELAY* relaysPointer);
 
 // Button state variables
 static GPIO_Value_Type sendMessageButtonState = GPIO_Value_High;
@@ -172,6 +175,19 @@ int main(int argc, char *argv[])
     Log_Debug("Application exiting.\n");
 
     return 0;
+}
+
+void SetRelayStates(RELAY* relaysPointer)
+{
+	if (relaysPointer->relay1_status == 1)
+		GPIO_SetValue(relay1PinFd, GPIO_Value_High);
+	else
+		GPIO_SetValue(relay1PinFd, GPIO_Value_Low);
+
+	if (relaysPointer->relay2_status == 1)
+		GPIO_SetValue(relay2PinFd, GPIO_Value_High);
+	else
+		GPIO_SetValue(relay2PinFd, GPIO_Value_Low);
 }
 
 /// <summary>
@@ -271,8 +287,7 @@ static int InitPeripheralsAndHandlers(void)
 	soil_sensor_address = GetAddress(SoilMoistureI2cDefaultAddress);
 	Log_Debug("Soil sensor address: %X\n", soil_sensor_address);
 
-	r1PinFd = GPIO_OpenAsOutput(SAMPLE_RELAY_1_CLICK_2, relay1Pin, GPIO_Value_Low);
-	r2PinFd = GPIO_OpenAsOutput(MIKROE_CS, relay2Pin, GPIO_Value_Low);
+	relaysState = open_relay(SetRelayStates, InitializeRelays);
 
     // Set up a timer to poll for button events.
     struct timespec buttonPressCheckPeriod = {0, 1000 * 1000};
@@ -294,6 +309,15 @@ static int InitPeripheralsAndHandlers(void)
 }
 
 /// <summary>
+///     Define GPIOs for relay click as outputs and initialize as low.
+/// </summary>
+void InitializeRelays(void)
+{
+	relay1PinFd = GPIO_OpenAsOutput(SAMPLE_RELAY_1_CLICK_2, relay1Pin, GPIO_Value_Low);
+	relay2PinFd = GPIO_OpenAsOutput(SAMPLE_RELAY_2_CLICK_2, relay2Pin, GPIO_Value_Low);
+}
+
+/// <summary>
 ///     Close peripherals and handlers.
 /// </summary>
 static void ClosePeripheralsAndHandlers(void)
@@ -305,6 +329,11 @@ static void ClosePeripheralsAndHandlers(void)
         GPIO_SetValue(deviceTwinStatusLedGpioFd, GPIO_Value_High);
     }
 
+	// Close relays
+	close_relay(relaysState);
+	GPIO_SetValue(relay1PinFd, GPIO_Value_Low);
+	GPIO_SetValue(relay2PinFd, GPIO_Value_Low);
+
     CloseFdAndPrintError(buttonPollTimerFd, "ButtonTimer");
     CloseFdAndPrintError(azureTimerFd, "AzureTimer");
     CloseFdAndPrintError(sendMessageButtonGpioFd, "SendMessageButton");
@@ -312,6 +341,8 @@ static void ClosePeripheralsAndHandlers(void)
     CloseFdAndPrintError(deviceTwinStatusLedGpioFd, "StatusLed");
     CloseFdAndPrintError(epollFd, "Epoll");
 	CloseFdAndPrintError(i2cFd, "I2C");
+	CloseFdAndPrintError(relay1PinFd, "Relay 1");
+	CloseFdAndPrintError(relay2PinFd, "Relay 2");
 }
 
 /// <summary>
@@ -333,6 +364,8 @@ static void HubConnectionStatusCallback(IOTHUB_CLIENT_CONNECTION_STATUS result,
 		snprintf(soilsensor_address_string, 10, "0x%02X", soil_sensor_address);
 		TwinReportStringState("soil_sensor_version", soilsensor_version_string);
 		TwinReportStringState("soil_sensor_address", soilsensor_address_string);
+		SendTelemetryRelay1();
+		SendTelemetryRelay2();
 	}
 }
 
@@ -435,10 +468,38 @@ static void TwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsigned ch
         TwinReportBoolState("StatusLED", statusLedOn);
     }
 
+	// Relay 1
+	JSON_Object* Relay1State = json_object_dotget_object(desiredProperties, "Relay1Setting");
+	if (Relay1State != NULL) {
+		bool tempStatusRelay = (bool)json_object_get_boolean(Relay1State, "value");
+		relaystate(relaysState, tempStatusRelay ? relay1_set : relay1_clr);
+		TwinReportBoolState("Relay1Setting", relaystate(relaysState, relay1_rd));
+		SendTelemetryRelay1();
+	}
+
+	// Relay 1
+	JSON_Object* Relay2State = json_object_dotget_object(desiredProperties, "Relay2Setting");
+	if (Relay2State != NULL) {
+		bool tempStatusRelay = (bool)json_object_get_boolean(Relay2State, "value");
+		relaystate(relaysState, tempStatusRelay ? relay2_set : relay2_clr);
+		TwinReportBoolState("Relay2Setting", relaystate(relaysState, relay2_rd));
+		SendTelemetryRelay2();
+	}
+
 cleanup:
     // Release the allocated memory.
     json_value_free(rootProperties);
     free(nullTerminatedJsonString);
+}
+
+void SendTelemetryRelay2()
+{
+	SendTelemetry("Relay2State", relaystate(relaysState, relay2_rd) == 1 ? "On" : "Off");
+}
+
+void SendTelemetryRelay1()
+{
+	SendTelemetry("Relay1State", relaystate(relaysState, relay1_rd) == 1 ? "On" : "Off");
 }
 
 /// <summary>
