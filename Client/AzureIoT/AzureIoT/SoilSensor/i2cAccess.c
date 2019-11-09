@@ -1,8 +1,20 @@
 #include "i2cAccess.h"
 #include <applibs\i2c.h>
 
-void WriteI2CRegister8bit(I2C_DeviceAddress sensorAddress, const uint8_t* value) {
-	I2CMaster_Write(i2cFd, sensorAddress, value, sizeof(value));
+void WriteI2CRegister8bit(I2C_DeviceAddress sensorAddress, const uint8_t* registerAddressAndValue) {
+	uint8_t buff[1];
+	buff[0] = registerAddressAndValue[0];
+
+	ssize_t transferredBytes =
+		I2CMaster_Write(i2cFd, sensorAddress, buff, sizeof(buff));
+	if (transferredBytes == -1)
+		Log_Debug("ERROR: I2CMaster_Writer: errno=%d (%s)\n", errno, strerror(errno));
+
+	buff[0] = registerAddressAndValue[1];
+	transferredBytes =
+		I2CMaster_Write(i2cFd, sensorAddress, buff, sizeof(buff));
+	if (transferredBytes == -1)
+		Log_Debug("ERROR: I2CMaster_Writer: errno=%d (%s)\n", errno, strerror(errno));
 }
 
 uint8_t ReadI2CRegister8bit(I2C_DeviceAddress sensorAddress, const uint8_t* registerAddress) {

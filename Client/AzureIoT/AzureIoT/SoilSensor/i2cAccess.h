@@ -1,9 +1,13 @@
 #pragma once
-#include <applibs\i2c.h>
+#include <applibs/i2c.h>
+#include <applibs/log.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
 
 extern int i2cFd;
 
-void WriteI2CRegister8bit(I2C_DeviceAddress sensorAddress, const uint8_t* value);
+void WriteI2CRegister8bit(I2C_DeviceAddress sensorAddress, const uint8_t* registerAddressAndValue);
 
 uint8_t ReadI2CRegister8bit(I2C_DeviceAddress sensorAddress, const uint8_t* registerAddress);
 

@@ -25,7 +25,7 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'" Label="Configuration">
     <UseDebugLibraries>true</UseDebugLibraries>
-    <TargetSysroot>2+Beta1905</TargetSysroot>
+    <TargetSysroot>3+Beta1909</TargetSysroot>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'" Label="Configuration">
     <UseDebugLibraries>false</UseDebugLibraries>
@@ -45,12 +45,14 @@
     <TargetHardwareDefinition>sample_hardware.json</TargetHardwareDefinition>
   </PropertyGroup>
   <ItemGroup>
+    <ClCompile Include="azure_iot_utilities.c" />
     <ClCompile Include="epoll_timerfd_utilities.c" />
     <ClCompile Include="main.c" />
     <ClCompile Include="parson.c" />
     <ClCompile Include="RelayClick\relay.c" />
     <ClCompile Include="SoilSensor\i2cAccess.c" />
     <ClCompile Include="SoilSensor\SoilMoistureI2cSensor.c" />
+    <ClInclude Include="azure_iot_utilities.h" />
     <ClInclude Include="epoll_timerfd_utilities.h" />
     <ClInclude Include="mt3620_avnet_dev.h" />
     <ClInclude Include="parson.h" />

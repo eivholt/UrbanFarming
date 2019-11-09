@@ -45,6 +45,7 @@
 #include <iothubtransportmqtt.h>
 #include <iothub.h>
 #include <azure_sphere_provisioning.h>
+#include "azure_iot_utilities.h"
 
 static volatile sig_atomic_t terminationRequired = false;
 
@@ -57,12 +58,31 @@ static volatile sig_atomic_t terminationRequired = false;
 
 // File descriptor - initialized to invalid value
 int i2cFd = -1;
-// Default i2c address, update if customized.
-static const I2C_DeviceAddress SoilMoistureI2cDefaultAddress = 0x20;
+// Default i2c addresses, update if customized.
+static const I2C_DeviceAddress SoilMoistureI2cDefaultAddress1 = 0x20;
+static const I2C_DeviceAddress SoilMoistureI2cDefaultAddress2 = 0x21;
+static const I2C_DeviceAddress WaterTankI2cDefaultAddress = 0x22;
 
-// Soil Sensor variables
-static uint8_t soil_sensor_version = 0;
-static uint8_t soil_sensor_address = 0;
+static const I2C_DeviceAddress moistureSensors[3] = 
+{ 
+	SoilMoistureI2cDefaultAddress1, 
+	SoilMoistureI2cDefaultAddress2, 
+	WaterTankI2cDefaultAddress 
+};
+
+static char temperatureSensorNames[3][21] = 
+{
+	"Temperature1", 
+	"Temperature2", 
+	"TemperatureWaterTank"
+};
+
+static char capacitanceSensorNames[3][21] =
+{
+	"Capacitance1",
+	"Capacitance2",
+	"CapacitanceWaterTank"
+};
 
 // Relay Click definitions and variables.
 static int relay1PinFd;  //relay #1
@@ -82,8 +102,8 @@ static bool iothubAuthenticated = false;
 static void SendMessageCallback(IOTHUB_CLIENT_CONFIRMATION_RESULT result, void *context);
 static void TwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsigned char *payload,
                          size_t payloadSize, void *userContextCallback);
-static void SendTelemetryRelay2();
-static void SendTelemetryRelay1();
+static void SendTelemetryRelay2(void);
+static void SendTelemetryRelay1(void);
 static void TwinReportBoolState(const char *propertyName, bool propertyValue);
 static void TwinReportStringState(const unsigned char* propertyName, const unsigned char* propertyValue);
 static void ReportStatusCallback(int result, void *context);
@@ -92,12 +112,12 @@ static const char *getAzureSphereProvisioningResultString(
     AZURE_SPHERE_PROV_RETURN_VALUE provisioningResult);
 static void SendTelemetry(const unsigned char *key, const unsigned char *value);
 static void SetupAzureClient(void);
-
-// Function to generate simulated Temperature data/telemetry
-static void SendSimulatedTemperature(void);
+static void SendMoistureTelemetry(void);
 
 // Initialization/Cleanup
 static int InitPeripheralsAndHandlers(void);
+static void DiagnoseMoistureSensors(void);
+static int DirectMethodCall(const char* methodName, const char* payload, size_t payloadSize, char** responsePayload, size_t* responsePayloadSize);
 static void InitializeRelays(void);
 static void ClosePeripheralsAndHandlers(void);
 
@@ -132,8 +152,13 @@ static void ButtonPollTimerEventHandler(EventData *eventData);
 static bool IsButtonPressed(int fd, GPIO_Value_Type *oldState);
 static void SendMessageButtonHandler(void);
 static void SendOrientationButtonHandler(void);
+static void ChangeSoilMoistureI2cAddress(I2C_DeviceAddress originAddress, I2C_DeviceAddress desiredAddress);
 static bool deviceIsUp = false; // Orientation
 static void AzureTimerEventHandler(EventData *eventData);
+
+// Method identifiers
+static const char Relay1PulseCommandName[] = "Relay1PulseCommand";
+static const char Relay2PulseCommandName[] = "Relay2PulseCommand";
 
 /// <summary>
 ///     Signal handler for termination requests. This handler must be async-signal-safe.
@@ -223,7 +248,7 @@ static void AzureTimerEventHandler(EventData *eventData)
     }
 
     if (iothubAuthenticated) {
-        SendSimulatedTemperature();
+        SendMoistureTelemetry();
         IoTHubDeviceClient_LL_DoWork(iothubClientHandle);
     }
 }
@@ -273,19 +298,20 @@ static int InitPeripheralsAndHandlers(void)
         return -1;
     }
 
-	// Initialize Soil Sensor
+	// Initialize Soil Sensors
 	Log_Debug("Opening ISU2 I2C\n");
 	i2cFd = I2CMaster_Open(MT3620_ISU2_I2C);
 	I2CMaster_SetBusSpeed(i2cFd, I2C_BUS_SPEED_STANDARD);
 	I2CMaster_SetTimeout(i2cFd, 100);
-	I2CMaster_SetDefaultTargetAddress(i2cFd, SoilMoistureI2cDefaultAddress);
 
-	InitializeSoilSensor(SoilMoistureI2cDefaultAddress, true);
-	soil_sensor_version = GetVersion(SoilMoistureI2cDefaultAddress);
-	Log_Debug("Soil sensor firmware version: %X\n", soil_sensor_version);
+	InitializeSoilSensor(SoilMoistureI2cDefaultAddress1, true);
+	InitializeSoilSensor(SoilMoistureI2cDefaultAddress2, true);
+	InitializeSoilSensor(WaterTankI2cDefaultAddress, true);
+	
+	DiagnoseMoistureSensors();
 
-	soil_sensor_address = GetAddress(SoilMoistureI2cDefaultAddress);
-	Log_Debug("Soil sensor address: %X\n", soil_sensor_address);
+	// Uncomment to change address of sensor
+	//ChangeSoilMoistureI2cAddress(SoilMoistureI2cDefaultAddress1, WaterTankI2cDefaultAddress);
 
 	relaysState = open_relay(SetRelayStates, InitializeRelays);
 
@@ -305,7 +331,201 @@ static int InitPeripheralsAndHandlers(void)
         return -1;
     }
 
+	// Tell the system about the callback function to call when we receive a Direct Method message from Azure
+	AzureIoT_SetDirectMethodCallback(&DirectMethodCall);
+
     return 0;
+}
+
+void DiagnoseMoistureSensors(void)
+{
+	for (int i = 0; i < 3; i++)
+	{
+		GetVersion(moistureSensors[i]);
+		GetAddress(moistureSensors[i]);
+
+		unsigned int soilSensor1Capacitance = GetCapacitance(moistureSensors[i]);
+		Log_Debug("Soil sensor (Address: %X) capacitance: %u\n", moistureSensors[i], soilSensor1Capacitance);
+		float soilSensor1Temperature = GetTemperature(moistureSensors[i]);
+		Log_Debug("Soil sensor (Address: %X) temperature: %.1f\n", moistureSensors[i], soilSensor1Temperature);
+	}
+}
+
+/// <summary>
+///     Allocates and formats a string message on the heap.
+/// </summary>
+/// <param name="messageFormat">The format of the message</param>
+/// <param name="maxLength">The maximum length of the formatted message string</param>
+/// <returns>The pointer to the heap allocated memory.</returns>
+static void* SetupHeapMessage(const char* messageFormat, size_t maxLength, ...)
+{
+	va_list args;
+	va_start(args, maxLength);
+	char* message =
+		malloc(maxLength + 1); // Ensure there is space for the null terminator put by vsnprintf.
+	if (message != NULL) {
+		vsnprintf(message, maxLength, messageFormat, args);
+	}
+	va_end(args);
+	return message;
+}
+
+/// <summary>
+///     Direct Method callback function, called when a Direct Method call is received from the Azure
+///     IoT Hub.
+/// </summary>
+/// <param name="methodName">The name of the method being called.</param>
+/// <param name="payload">The payload of the method.</param>
+/// <param name="responsePayload">The response payload content. This must be a heap-allocated
+/// string, 'free' will be called on this buffer by the Azure IoT Hub SDK.</param>
+/// <param name="responsePayloadSize">The size of the response payload content.</param>
+/// <returns>200 HTTP status code if the method name is reconginized and the payload is correctly parsed;
+/// 400 HTTP status code if the payload is invalid;</returns>
+/// 404 HTTP status code if the method name is unknown.</returns>
+static int DirectMethodCall(const char* methodName, const char* payload, size_t payloadSize, char** responsePayload, size_t* responsePayloadSize)
+{
+	Log_Debug("\nDirect Method called %s\n", methodName);
+
+	int result = 404; // HTTP status code.
+
+	if (payloadSize < 32) {
+
+		// Declare a char buffer on the stack where we'll operate on a copy of the payload.  
+		char directMethodCallContent[payloadSize + 1];
+
+		// Prepare the payload for the response. This is a heap allocated null terminated string.
+		// The Azure IoT Hub SDK is responsible of freeing it.
+		*responsePayload = NULL;  // Reponse payload content.
+		*responsePayloadSize = 0; // Response payload content size.
+
+
+		// Look for the haltApplication method name.  This direct method does not require any payload, other than
+		// a valid Json argument such as {}.
+
+		if (strcmp(methodName, Relay1PulseCommandName) == 0) {
+
+			// Log that the direct method was called and set the result to reflect success!
+			Log_Debug("Relay1PulseCommand() Direct Method called\n");
+			result = 200;
+
+			// Construct the response message.  This response will be displayed in the cloud when calling the direct method
+			static const char resetOkResponse[] =
+				"{ \"success\" : true, \"message\" : \"Running Relay1PulseCommand\" }";
+			size_t responseMaxLength = sizeof(resetOkResponse);
+			*responsePayload = SetupHeapMessage(resetOkResponse, responseMaxLength);
+			if (*responsePayload == NULL) {
+				Log_Debug("ERROR: Could not allocate buffer for direct method response payload.\n");
+				abort();
+			}
+			*responsePayloadSize = strlen(*responsePayload);
+
+			relaystate(relaysState, relay1_set);
+			TwinReportBoolState("Relay1Setting", relaystate(relaysState, relay1_rd));
+			SendTelemetryRelay1();
+			return result;
+		}
+
+		// Check to see if the setSensorPollTime direct method was called
+		else if (strcmp(methodName, Relay2PulseCommandName) == 0) {
+
+			// Log that the direct method was called and set the result to reflect success!
+			Log_Debug("Relay2PulseCommand() Direct Method called\n");
+			result = 200;
+
+			// The payload should contain a JSON object such as: {"seconds": 5}
+			if (directMethodCallContent == NULL) {
+				Log_Debug("ERROR: Could not allocate buffer for direct method request payload.\n");
+				abort();
+			}
+
+			// Copy the payload into our local buffer then null terminate it.
+			memcpy(directMethodCallContent, payload, payloadSize);
+			directMethodCallContent[payloadSize] = 0; // Null terminated string.
+
+			JSON_Value* payloadJson = json_parse_string(directMethodCallContent);
+
+			// Verify we have a valid JSON string from the payload
+			if (payloadJson == NULL) {
+				goto payloadError;
+			}
+
+			// Verify that the payloadJson contains a valid JSON object
+			JSON_Object* pollTimeJson = json_value_get_object(payloadJson);
+			if (pollTimeJson == NULL) {
+				goto payloadError;
+			}
+
+			// Pull the Key: value pair from the JSON object, we're looking for {"seconds": <integer>}
+			// Verify that the new timer is < 0
+			int relay2PulseSeconds = (int)json_object_get_number(pollTimeJson, "Seconds");
+			if (relay2PulseSeconds < 1) {
+				goto payloadError;
+			}
+			else {
+
+				Log_Debug("Relay 2 pulse seconds %d\n", relay2PulseSeconds);
+
+				// Construct the response message.  This will be displayed in the cloud when calling the direct method
+				static const char relay2PulseSecondsResponse[] =
+					"{ \"success\" : true, \"message\" : \"Relay 2 pulse %d seconds\" }";
+				size_t responseMaxLength = sizeof(relay2PulseSecondsResponse) + strlen(payload);
+				*responsePayload = SetupHeapMessage(relay2PulseSecondsResponse, responseMaxLength, relay2PulseSeconds);
+				if (*responsePayload == NULL) {
+					Log_Debug("ERROR: Could not allocate buffer for direct method response payload.\n");
+					abort();
+				}
+				*responsePayloadSize = strlen(*responsePayload);
+
+				// Define a new timespec variable for the timer and change the timer period
+				struct timespec newAccelReadPeriod = { .tv_sec = relay2PulseSeconds,.tv_nsec = 0 };
+				//SetTimerFdToPeriod(accelTimerFd, &newAccelReadPeriod);
+				return result;
+			}
+		}
+		else {
+			result = 404;
+			Log_Debug("INFO: Direct Method called \"%s\" not found.\n", methodName);
+
+			static const char noMethodFound[] = "\"method not found '%s'\"";
+			size_t responseMaxLength = sizeof(noMethodFound) + strlen(methodName);
+			*responsePayload = SetupHeapMessage(noMethodFound, responseMaxLength, methodName);
+			if (*responsePayload == NULL) {
+				Log_Debug("ERROR: Could not allocate buffer for direct method response payload.\n");
+				abort();
+			}
+			*responsePayloadSize = strlen(*responsePayload);
+			return result;
+		}
+
+	}
+	else {
+		Log_Debug("Payload size > 32 bytes, aborting Direct Method execution\n");
+		goto payloadError;
+	}
+
+	// If there was a payload error, construct the 
+	// response message and send it back to the IoT Hub for the user to see
+payloadError:
+
+
+	result = 400; // Bad request.
+	Log_Debug("INFO: Unrecognised direct method payload format.\n");
+
+	static const char noPayloadResponse[] =
+		"{ \"success\" : false, \"message\" : \"request does not contain an identifiable "
+		"payload\" }";
+
+	size_t responseMaxLength = sizeof(noPayloadResponse) + strlen(payload);
+	responseMaxLength = sizeof(noPayloadResponse);
+	*responsePayload = SetupHeapMessage(noPayloadResponse, responseMaxLength);
+	if (*responsePayload == NULL) {
+		Log_Debug("ERROR: Could not allocate buffer for direct method response payload.\n");
+		abort();
+	}
+	*responsePayloadSize = strlen(*responsePayload);
+
+	return result;
+
 }
 
 /// <summary>
@@ -360,10 +580,10 @@ static void HubConnectionStatusCallback(IOTHUB_CLIENT_CONNECTION_STATUS result,
 	{
 		char soilsensor_version_string[10] = { 0 };
 		char soilsensor_address_string[10] = { 0 };
-		snprintf(soilsensor_version_string, 10, "0x%02X", soil_sensor_version);
-		snprintf(soilsensor_address_string, 10, "0x%02X", soil_sensor_address);
-		TwinReportStringState("soil_sensor_version", soilsensor_version_string);
-		TwinReportStringState("soil_sensor_address", soilsensor_address_string);
+		snprintf(soilsensor_version_string, 10, "0x%02X", GetVersion(SoilMoistureI2cDefaultAddress2));
+		snprintf(soilsensor_address_string, 10, "0x%02X", GetAddress(SoilMoistureI2cDefaultAddress2));
+		TwinReportStringState("SoilSensor2VersionProperty", soilsensor_version_string);
+		TwinReportStringState("SoilSensor2AddressProperty", soilsensor_address_string);
 		SendTelemetryRelay1();
 		SendTelemetryRelay2();
 	}
@@ -423,6 +643,7 @@ static void SetupAzureClient(void)
     IoTHubDeviceClient_LL_SetDeviceTwinCallback(iothubClientHandle, TwinCallback, NULL);
     IoTHubDeviceClient_LL_SetConnectionStatusCallback(iothubClientHandle,
                                                       HubConnectionStatusCallback, NULL);
+	AzureIoT_SetupClient(iothubClientHandle);
 }
 
 /// <summary>
@@ -492,12 +713,12 @@ cleanup:
     free(nullTerminatedJsonString);
 }
 
-void SendTelemetryRelay2()
+static void SendTelemetryRelay2(void)
 {
 	SendTelemetry("Relay2State", relaystate(relaysState, relay2_rd) == 1 ? "On" : "Off");
 }
 
-void SendTelemetryRelay1()
+static void SendTelemetryRelay1(void)
 {
 	SendTelemetry("Relay1State", relaystate(relaysState, relay1_rd) == 1 ? "On" : "Off");
 }
@@ -597,7 +818,7 @@ static void SendTelemetry(const unsigned char *key, const unsigned char *value)
 /// <param name="context">User specified context</param>
 static void SendMessageCallback(IOTHUB_CLIENT_CONFIRMATION_RESULT result, void *context)
 {
-    Log_Debug("INFO: Message received by IoT Hub. Result is: %d\n", result);
+    //Log_Debug("INFO: Message received by IoT Hub. Result is: %d\n", result);
 }
 
 /// <summary>
@@ -669,36 +890,41 @@ static void ReportStatusCallback(int result, void *context)
 }
 
 /// <summary>
-///     Generates a simulated Temperature and sends to IoT Hub.
+///     Collect sensor readings and send to IoT Central.
 /// </summary>
-void SendSimulatedTemperature(void)
+void SendMoistureTelemetry(void)
 {
-	float soilSensorTemperature = -1;
-	unsigned int soilSensorCapacitance = 0;;
+	
 
-	if (IsBusy(SoilMoistureI2cDefaultAddress)) {
-		Log_Debug("Soil sensor is busy\n");
-	}
-	else {
-		soilSensorTemperature = GetTemperature(SoilMoistureI2cDefaultAddress);
-		Log_Debug("Soil sensor temperature: %.1f\n", soilSensorTemperature);
+	for (int i = 0; i < 3; i++)
+	{
+		float sensorTemperature = -1;
+		unsigned int sensorCapacitance = 0;
 
-		soilSensorCapacitance = GetCapacitance(SoilMoistureI2cDefaultAddress);
-		Log_Debug("Soil sensor capacitance: %u\n", soilSensorCapacitance);
-	}
-		
-	if (soilSensorTemperature > -1) {
-		char tempBuffer[20];
-		int len = snprintf(tempBuffer, 20, "%3.1f", soilSensorTemperature);
-		if (len > 0)
-			SendTelemetry("Temperature", tempBuffer);
-	}
+		if (IsBusy(moistureSensors[i])) 
+		{
+				Log_Debug("Soil sensor is busy\n");
+		}
+		else {
+			sensorTemperature = GetTemperature(moistureSensors[i]);
+			Log_Debug("Soil sensor (Address: %X) temperature: %.1f\n", moistureSensors[i], sensorTemperature);
 
-	if (soilSensorCapacitance > 0) {
-		char tempBuffer[20];
-		int len = snprintf(tempBuffer, 20, "%u", soilSensorCapacitance);
-		if (len > 0)
-			SendTelemetry("Capacitance", tempBuffer);
+			sensorCapacitance = GetCapacitance(moistureSensors[i]);
+			Log_Debug("Soil sensor (Address: %X) capacitance: %u\n", moistureSensors[i], sensorCapacitance);
+			if (sensorTemperature > -1) {
+				char tempBuffer[20] = { 0 };
+				int len = snprintf(tempBuffer, 20, "%3.1f", sensorTemperature);
+				if (len > 0)
+					SendTelemetry(temperatureSensorNames[i], tempBuffer);
+			}
+
+			if (sensorCapacitance > 0) {
+				char tempBuffer[20] = { 0 };
+				int len = snprintf(tempBuffer, 20, "%u", sensorCapacitance);
+				if (len > 0)
+					SendTelemetry(capacitanceSensorNames[i], tempBuffer);
+			}
+		}
 	}
 }
 
@@ -746,4 +972,15 @@ static void SendOrientationButtonHandler(void)
         deviceIsUp = !deviceIsUp;
         SendTelemetry("Orientation", deviceIsUp ? "Up" : "Down");
     }
+}
+
+static void ChangeSoilMoistureI2cAddress(I2C_DeviceAddress originAddress, I2C_DeviceAddress desiredAddress)
+{
+	SetAddress(originAddress, desiredAddress, true);
+	//GetAddress(originAddress);
+	//GetAddress(desiredAddress);
+	while(true)
+	{
+		// Program should not continue, stop and update new addresses.
+	}
 }

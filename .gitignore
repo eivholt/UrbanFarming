@@ -9,3 +9,6 @@
 /Client/AzureIoT/AzureIoT/app_manifest.json
 /Client/AzureIoT/AzureIoT/bin/ARM/Debug
 /Client/AzureIoT/IoTCentral
+/Server/UrbanFarmingWebApp/bin
+/Server/UrbanFarmingWebApp/obj
+/Artwork

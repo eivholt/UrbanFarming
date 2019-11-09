@@ -1,6 +1,7 @@
 #pragma once
 #include "i2cAccess.h"
 #include <stdbool.h>
+#include <applibs/log.h>
 
 //Soil Moisture Sensor Register Addresses
 #define SOILMOISTURESENSOR_GET_CAPACITANCE 	0x00 // (r) 	2 bytes
@@ -17,6 +18,8 @@
 void ResetSoilSensor(I2C_DeviceAddress sensorAddress);
 
 void InitializeSoilSensor(I2C_DeviceAddress sensorAddress, bool waitForSensor);
+
+void SetAddress(I2C_DeviceAddress sensorAddress, I2C_DeviceAddress desiredAddress, bool reset);
 
 uint8_t GetVersion(I2C_DeviceAddress sensorAddress);
 
