@@ -85,11 +85,12 @@ static char capacitanceSensorNames[3][21] =
 };
 
 // Relay Click definitions and variables.
-static int relay1PinFd;  //relay #1
+static int relay1PinFd = -1;  //relay #1
 static GPIO_Value_Type relay1Pin;
-static int relay2PinFd;  //relay #2
+static int relay2PinFd = -1;  //relay #2
 static GPIO_Value_Type relay2Pin;
 static RELAY* relaysState;
+static const int Relay1DefaultPollPeriodSeconds = 10;
 
 // Azure IoT Hub/Central defines.
 #define SCOPEID_LENGTH 20
@@ -131,6 +132,8 @@ static int deviceTwinStatusLedGpioFd = -1;
 static bool statusLedOn = false;
 
 // Timer / polling
+static int relay1PollTimerFd = -1;
+static int relay2PollTimerFd = -1;
 static int buttonPollTimerFd = -1;
 static int azureTimerFd = -1;
 static int epollFd = -1;
@@ -229,6 +232,20 @@ static void ButtonPollTimerEventHandler(EventData *eventData)
 }
 
 /// <summary>
+/// Relay timer event: Timer elapsed, toggle relay 1.
+/// </summary>
+static void Relay1PollTimerEventHandler(EventData* eventData)
+{
+	if (ConsumeTimerFdEvent(relay1PollTimerFd) != 0) {
+		terminationRequired = true;
+		return;
+	}
+
+	Log_Debug("Relay1PollTimerEventHandler\n");
+	relaystate(relaysState, relay1_rd) ? relaystate(relaysState, relay1_clr) : relaystate(relaysState, relay1_set);
+}
+
+/// <summary>
 /// Azure timer event:  Check connection status and send telemetry
 /// </summary>
 static void AzureTimerEventHandler(EventData *eventData)
@@ -254,8 +271,9 @@ static void AzureTimerEventHandler(EventData *eventData)
 }
 
 // event handler data structures. Only the event handler field needs to be populated.
-static EventData buttonPollEventData = {.eventHandler = &ButtonPollTimerEventHandler};
-static EventData azureEventData = {.eventHandler = &AzureTimerEventHandler};
+static EventData relay1PollEventData = { .eventHandler = &Relay1PollTimerEventHandler };
+static EventData buttonPollEventData = { .eventHandler = &ButtonPollTimerEventHandler };
+static EventData azureEventData = { .eventHandler = &AzureTimerEventHandler };
 
 /// <summary>
 ///     Set up SIGTERM termination handler, initialize peripherals, and set up event handlers.
@@ -314,6 +332,12 @@ static int InitPeripheralsAndHandlers(void)
 	//ChangeSoilMoistureI2cAddress(SoilMoistureI2cDefaultAddress1, WaterTankI2cDefaultAddress);
 
 	relaysState = open_relay(SetRelayStates, InitializeRelays);
+	// Set up times to evaluate if relays should change state
+	struct timespec relay1CheckPeriod = { Relay1DefaultPollPeriodSeconds, 0 };
+	relay1PollTimerFd = CreateTimerFdAndAddToEpoll(epollFd, &relay1CheckPeriod, &relay1PollEventData, EPOLLIN);
+	if (relay1PollTimerFd < 0) {
+		return -1;
+	}
 
     // Set up a timer to poll for button events.
     struct timespec buttonPressCheckPeriod = {0, 1000 * 1000};
@@ -327,7 +351,7 @@ static int InitPeripheralsAndHandlers(void)
     struct timespec azureTelemetryPeriod = {azureIoTPollPeriodSeconds, 0};
     azureTimerFd =
         CreateTimerFdAndAddToEpoll(epollFd, &azureTelemetryPeriod, &azureEventData, EPOLLIN);
-    if (buttonPollTimerFd < 0) {
+    if (azureTimerFd < 0) {
         return -1;
     }
 
@@ -563,6 +587,8 @@ static void ClosePeripheralsAndHandlers(void)
 	CloseFdAndPrintError(i2cFd, "I2C");
 	CloseFdAndPrintError(relay1PinFd, "Relay 1");
 	CloseFdAndPrintError(relay2PinFd, "Relay 2");
+	CloseFdAndPrintError(relay1PollTimerFd, "Relay 1");
+	CloseFdAndPrintError(relay2PollTimerFd, "Relay 2");
 }
 
 /// <summary>
@@ -712,15 +738,14 @@ cleanup:
     json_value_free(rootProperties);
     free(nullTerminatedJsonString);
 }
+static void SendTelemetryRelay1(void)
+{
+	SendTelemetry("Relay1State", relaystate(relaysState, relay1_rd) == 1 ? "On" : "Off");
+}
 
 static void SendTelemetryRelay2(void)
 {
 	SendTelemetry("Relay2State", relaystate(relaysState, relay2_rd) == 1 ? "On" : "Off");
-}
-
-static void SendTelemetryRelay1(void)
-{
-	SendTelemetry("Relay1State", relaystate(relaysState, relay1_rd) == 1 ? "On" : "Off");
 }
 
 /// <summary>
@@ -974,6 +999,10 @@ static void SendOrientationButtonHandler(void)
     }
 }
 
+/// <summary>
+/// Change address of a soil sensor. Do not change addresses with more than 
+/// one sensor connected with the same address.
+/// </summary>
 static void ChangeSoilMoistureI2cAddress(I2C_DeviceAddress originAddress, I2C_DeviceAddress desiredAddress)
 {
 	SetAddress(originAddress, desiredAddress, true);
