@@ -168,6 +168,7 @@ static void SwitchOnLampAtDayTime(void);
 static bool deviceIsUp = false; // Orientation
 
 static void RelayPollTimerEventHandler(EventData* eventData);
+int MinutesFromHoursAndMinutes(int* hours, int* minutes);
 static void Pulse1TimerEventHandler(EventData* eventData);
 static void ButtonPollTimerEventHandler(EventData* eventData);
 static void AzureTimerEventHandler(EventData *eventData);
@@ -270,7 +271,28 @@ static void RelayPollTimerEventHandler(EventData* eventData)
 	//Log_Debug("RelayPollTimerEventHandler\n");
 	PulseRelay1();
 	SwitchOnLampAtDayTime();
-	//relaystate(relaysState, relay1_rd) ? relaystate(relaysState, relay1_clr) : relaystate(relaysState, relay1_set);
+	if (relay2WorkingHoursInEffect) {
+		
+		struct timespec currentTime;
+		struct tm* gmtTm;
+		clock_gettime(CLOCK_REALTIME, &currentTime);
+		gmtTm = gmtime(&currentTime.tv_sec);
+		int currentGmtMinutes = MinutesFromHoursAndMinutes(&gmtTm->tm_hour, &gmtTm->tm_min);
+		int onTimeMinutes = MinutesFromHoursAndMinutes(&relay2WorkingHoursOn, &relay2WorkingMinutesOn);
+		int offTimeMinutes = MinutesFromHoursAndMinutes(&relay2WorkingHoursOff, &relay2WorkingMinutesOff);
+
+		if (currentGmtMinutes < onTimeMinutes
+			|| currentGmtMinutes >= offTimeMinutes) {
+			relaystate(relaysState, relay2_clr);
+		}
+		else {
+			relaystate(relaysState, relay2_set);
+		}
+	}
+}
+
+int MinutesFromHoursAndMinutes(int* hours, int* minutes) {
+	return *hours * 60 + *minutes;
 }
 
 /// <summary>
@@ -865,6 +887,13 @@ static void EnableRelay2WorkingHours(void)
 		&& relay2WorkingHoursOff > -1
 		&& relay2WorkingMinutesOff > -1) 
 	{
+		// Is Off-time after On-time?
+		if ((relay2WorkingHoursOff * 60 + relay2WorkingMinutesOff) 
+			<= (relay2WorkingHoursOn * 60 + relay2WorkingMinutesOn)) {
+			Log_Debug("WARNING: Relay 2 working hours off-time is not after on-time\n");
+			relay2WorkingHoursInEffect = false;
+			return;
+		}
 		relay2WorkingHoursInEffect = true;
 	}
 }
