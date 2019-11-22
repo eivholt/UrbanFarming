@@ -94,7 +94,9 @@ static RELAY* relaysState;
 static const int Relay1DefaultPollPeriodSeconds = 1;
 static bool relay2WorkingHoursInEffect = false;
 static int relay2WorkingHoursOn = -1;
+static int relay2WorkingMinutesOn = -1;
 static int relay2WorkingHoursOff = -1;
+static int relay2WorkingMinutesOff = -1;
 
 // Azure IoT Hub/Central defines.
 #define SCOPEID_LENGTH 20
@@ -107,7 +109,8 @@ static bool iothubAuthenticated = false;
 static void SendMessageCallback(IOTHUB_CLIENT_CONFIRMATION_RESULT result, void *context);
 static void TwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsigned char *payload,
                          size_t payloadSize, void *userContextCallback);
-static void EnableRelay2WorkingHours(int workingHoursOn, int workingHoursOff);
+static void ParseHourMinuteFromJson(JSON_Object* Relay2OnTimeSetting, int *hours, int *minutes);
+static void EnableRelay2WorkingHours(void);
 static void SendTelemetryRelay1(void);
 static void SendTelemetryRelay2(void);
 static void TwinReportBoolState(const char *propertyName, bool propertyValue);
@@ -264,7 +267,7 @@ static void RelayPollTimerEventHandler(EventData* eventData)
 		return;
 	}
 
-	Log_Debug("RelayPollTimerEventHandler\n");
+	//Log_Debug("RelayPollTimerEventHandler\n");
 	PulseRelay1();
 	SwitchOnLampAtDayTime();
 	//relaystate(relaysState, relay1_rd) ? relaystate(relaysState, relay1_clr) : relaystate(relaysState, relay1_set);
@@ -810,25 +813,20 @@ static void TwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsigned ch
 		SendTelemetryRelay2();
 	}
 
-	size_t nullTerminatedJsonDateTimeSize = 24 + 1;
-	int jsonDateStartIndex = 11;
-
 	// Relay 2 ON time Setting
 	JSON_Object* Relay2OnTimeSetting = json_object_dotget_object(desiredProperties, "Relay2OnTimeSetting");
 	if (Relay2OnTimeSetting != NULL) {
-		//char* relay2OnTimeHourBuffer = (char*)malloc(2 + 1);
-		char relay2OnTimeHourBuffer[2 + 1] = "00";
-		char* nullTerminatedRelay2OnDateTime = (char*)malloc(nullTerminatedJsonDateTimeSize);
-		// Copy the provided buffer to a null terminated buffer.
-		memcpy(nullTerminatedRelay2OnDateTime, json_object_get_string(Relay2OnTimeSetting, "value"), nullTerminatedJsonDateTimeSize);
-		// Add the null terminator at the end.
-		nullTerminatedRelay2OnDateTime[nullTerminatedJsonDateTimeSize - 1] = 0;
-		memcpy(relay2OnTimeHourBuffer, &nullTerminatedRelay2OnDateTime[jsonDateStartIndex], 2);
-		relay2WorkingHoursOn = atoi(relay2OnTimeHourBuffer);
-		free(nullTerminatedRelay2OnDateTime);
-		free(relay2OnTimeHourBuffer);
-		EnableRelay2WorkingHours(relay2WorkingHoursOn, relay2WorkingHoursOff);
-		//TwinReportBoolState("Relay2OnTimeSetting", relaystate(relaysState, relay2_rd));
+		ParseHourMinuteFromJson(Relay2OnTimeSetting, &relay2WorkingHoursOn, &relay2WorkingMinutesOn);
+		EnableRelay2WorkingHours();
+		TwinReportStringState("Relay2OnTimeSetting", json_object_get_string(Relay2OnTimeSetting, "value"));
+	}
+
+	// Relay 2 OFF time Setting
+	JSON_Object* Relay2OffTimeSetting = json_object_dotget_object(desiredProperties, "Relay2OffTimeSetting");
+	if (Relay2OffTimeSetting != NULL) {
+		ParseHourMinuteFromJson(Relay2OffTimeSetting, &relay2WorkingHoursOff, &relay2WorkingMinutesOff);
+		EnableRelay2WorkingHours();
+		TwinReportStringState("Relay2OffTimeSetting", json_object_get_string(Relay2OffTimeSetting, "value"));
 	}
 
 cleanup:
@@ -837,13 +835,36 @@ cleanup:
     free(nullTerminatedJsonString);
 }
 
-static void EnableRelay2WorkingHours(int workingHoursOn, int workingHoursOff)
+void ParseHourMinuteFromJson(JSON_Object* Relay2OnTimeSetting, int *hours, int *minutes)
 {
-	// Should perform a lot of validation
-	relay2WorkingHoursOn = workingHoursOn;
-	relay2WorkingHoursOff = workingHoursOff;
-	
-	if (relay2WorkingHoursOn > -1 && relay2WorkingHoursOff > -1) {
+	size_t nullTerminatedJsonDateTimeSize = 24 + 1;
+	int jsonDateTimeHourStartIndex = 11;
+	int jsonDateTimeMinuteStartIndex = 14;
+	char relay2OnTimeHourBuffer[2 + 1] = "00";
+	char relay2OnTimeMinuteBuffer[2 + 1] = "00";
+	char* nullTerminatedRelay2OnDateTime = (char*)malloc(nullTerminatedJsonDateTimeSize);
+	// Copy the provided buffer to a null terminated buffer.
+	memcpy(nullTerminatedRelay2OnDateTime, json_object_get_string(Relay2OnTimeSetting, "value"), nullTerminatedJsonDateTimeSize);
+	// Add the null terminator at the end.
+	nullTerminatedRelay2OnDateTime[nullTerminatedJsonDateTimeSize - 1] = 0;
+	memcpy(relay2OnTimeHourBuffer, &nullTerminatedRelay2OnDateTime[jsonDateTimeHourStartIndex], 2);
+	memcpy(relay2OnTimeMinuteBuffer, &nullTerminatedRelay2OnDateTime[jsonDateTimeMinuteStartIndex], 2);
+	*hours = atoi(relay2OnTimeHourBuffer);
+	*minutes = atoi(relay2OnTimeMinuteBuffer);
+	free(nullTerminatedRelay2OnDateTime);
+}
+
+/// <summary>
+///     If valid on- and off-time is configured in IoT Central, enable checks to toggle relay 2.
+/// </summary>
+static void EnableRelay2WorkingHours(void)
+{
+	// Should perform a lot of validation	
+	if (relay2WorkingHoursOn > -1 
+		&& relay2WorkingMinutesOn > -1
+		&& relay2WorkingHoursOff > -1
+		&& relay2WorkingMinutesOff > -1) 
+	{
 		relay2WorkingHoursInEffect = true;
 	}
 }
@@ -998,8 +1019,8 @@ static void TwinReportStringState(const unsigned char* propertyName, const unsig
 		Log_Debug("ERROR: client not initialized\n");
 	}
 	else {
-		static char reportedPropertiesString[40] = { 0 };
-		int len = snprintf(reportedPropertiesString, 40, "{\"%s\":\"%s\"}", propertyName,
+		static char reportedPropertiesString[60] = { 0 };
+		int len = snprintf(reportedPropertiesString, 60, "{\"%s\":\"%s\"}", propertyName,
 			propertyValue);
 		if (len < 0)
 			return;
