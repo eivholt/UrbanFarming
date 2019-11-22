@@ -47,7 +47,7 @@
 #include <azure_sphere_provisioning.h>
 #include "azure_iot_utilities.h"
 
-static volatile sig_atomic_t terminationRequired = false;
+extern volatile sig_atomic_t terminationRequired = false;
 
 #include "parson.h" // used to parse Device Twin messages.
 
@@ -55,6 +55,7 @@ static volatile sig_atomic_t terminationRequired = false;
 #include "SoilSensor\i2cAccess.h"
 #include "SoilSensor\SoilMoistureI2cSensor.h"
 #include "RelayClick\relay.h"
+#include "time_utilities.h"
 
 // File descriptor - initialized to invalid value
 int i2cFd = -1;
@@ -90,7 +91,10 @@ static GPIO_Value_Type relay1Pin;
 static int relay2PinFd = -1;  //relay #2
 static GPIO_Value_Type relay2Pin;
 static RELAY* relaysState;
-static const int Relay1DefaultPollPeriodSeconds = 10;
+static const int Relay1DefaultPollPeriodSeconds = 1;
+static bool relay2WorkingHoursInEffect = false;
+static int relay2WorkingHoursOn = -1;
+static int relay2WorkingHoursOff = -1;
 
 // Azure IoT Hub/Central defines.
 #define SCOPEID_LENGTH 20
@@ -103,8 +107,9 @@ static bool iothubAuthenticated = false;
 static void SendMessageCallback(IOTHUB_CLIENT_CONFIRMATION_RESULT result, void *context);
 static void TwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsigned char *payload,
                          size_t payloadSize, void *userContextCallback);
-static void SendTelemetryRelay2(void);
+static void EnableRelay2WorkingHours(int workingHoursOn, int workingHoursOff);
 static void SendTelemetryRelay1(void);
+static void SendTelemetryRelay2(void);
 static void TwinReportBoolState(const char *propertyName, bool propertyValue);
 static void TwinReportStringState(const unsigned char* propertyName, const unsigned char* propertyValue);
 static void ReportStatusCallback(int result, void *context);
@@ -113,11 +118,11 @@ static const char *getAzureSphereProvisioningResultString(
     AZURE_SPHERE_PROV_RETURN_VALUE provisioningResult);
 static void SendTelemetry(const unsigned char *key, const unsigned char *value);
 static void SetupAzureClient(void);
-static void SendMoistureTelemetry(void);
+static void SendTelemetryMoisture(void);
 
 // Initialization/Cleanup
 static int InitPeripheralsAndHandlers(void);
-static void DiagnoseMoistureSensors(void);
+static void GetMoistureSensorsInfo(void);
 static int DirectMethodCall(const char* methodName, const char* payload, size_t payloadSize, char** responsePayload, size_t* responsePayloadSize);
 static void InitializeRelays(void);
 static void ClosePeripheralsAndHandlers(void);
@@ -132,8 +137,8 @@ static int deviceTwinStatusLedGpioFd = -1;
 static bool statusLedOn = false;
 
 // Timer / polling
-static int relay1PollTimerFd = -1;
-static int relay2PollTimerFd = -1;
+static int relayPollTimerFd = -1;
+static int pulse1OneShotTimerFd = -1;
 static int buttonPollTimerFd = -1;
 static int azureTimerFd = -1;
 static int epollFd = -1;
@@ -151,13 +156,27 @@ static void SetRelayStates(RELAY* relaysPointer);
 static GPIO_Value_Type sendMessageButtonState = GPIO_Value_High;
 static GPIO_Value_Type sendOrientationButtonState = GPIO_Value_High;
 
-static void ButtonPollTimerEventHandler(EventData *eventData);
 static bool IsButtonPressed(int fd, GPIO_Value_Type *oldState);
 static void SendMessageButtonHandler(void);
 static void SendOrientationButtonHandler(void);
 static void ChangeSoilMoistureI2cAddress(I2C_DeviceAddress originAddress, I2C_DeviceAddress desiredAddress);
+static void PulseRelay1(void);
+static void SwitchOnLampAtDayTime(void);
 static bool deviceIsUp = false; // Orientation
+
+static void RelayPollTimerEventHandler(EventData* eventData);
+static void Pulse1TimerEventHandler(EventData* eventData);
+static void ButtonPollTimerEventHandler(EventData* eventData);
 static void AzureTimerEventHandler(EventData *eventData);
+
+// Event handler data structures. Only the event handler field needs to be populated.
+static EventData relayPollEventData = { .eventHandler = &RelayPollTimerEventHandler };
+static EventData pulse1EventData = { .eventHandler = &Pulse1TimerEventHandler };
+static EventData buttonPollEventData = { .eventHandler = &ButtonPollTimerEventHandler };
+static EventData azureEventData = { .eventHandler = &AzureTimerEventHandler };
+
+// A null period to not start the timer when it is created with CreateTimerFdAndAddToEpoll.
+static const struct timespec nullPeriod = { 0, 0 };
 
 // Method identifiers
 static const char Relay1PulseCommandName[] = "Relay1PulseCommand";
@@ -186,6 +205,10 @@ int main(int argc, char *argv[])
         Log_Debug("ScopeId needs to be set in the app_manifest CmdArgs\n");
         return -1;
     }
+
+	// Note that the offset is positive if the local time zone is west of the Prime Meridian and
+	// negative if it is east.
+	SetLocalTimeZone("GMT-1"); // Norway
 
     if (InitPeripheralsAndHandlers() != 0) {
         terminationRequired = true;
@@ -232,48 +255,96 @@ static void ButtonPollTimerEventHandler(EventData *eventData)
 }
 
 /// <summary>
-/// Relay timer event: Timer elapsed, toggle relay 1.
+/// Relay timer event: Timer elapsed, evaluate and toggle relays.
 /// </summary>
-static void Relay1PollTimerEventHandler(EventData* eventData)
+static void RelayPollTimerEventHandler(EventData* eventData)
 {
-	if (ConsumeTimerFdEvent(relay1PollTimerFd) != 0) {
+	if (ConsumeTimerFdEvent(relayPollTimerFd) != 0) {
 		terminationRequired = true;
 		return;
 	}
 
-	Log_Debug("Relay1PollTimerEventHandler\n");
-	relaystate(relaysState, relay1_rd) ? relaystate(relaysState, relay1_clr) : relaystate(relaysState, relay1_set);
+	Log_Debug("RelayPollTimerEventHandler\n");
+	PulseRelay1();
+	SwitchOnLampAtDayTime();
+	//relaystate(relaysState, relay1_rd) ? relaystate(relaysState, relay1_clr) : relaystate(relaysState, relay1_set);
+}
+
+/// <summary>
+/// Relay1 pulse timer event: Relay 1 pulse elapsed, toggle relay and clean up timer.
+/// </summary>
+static void Pulse1TimerEventHandler(EventData* eventData)
+{
+	if (ConsumeTimerFdEvent(pulse1OneShotTimerFd) != 0) {
+		terminationRequired = true;
+		return;
+	}
+
+	Log_Debug("Pulse1TimerEventHandler\n");
+	//relaystate(relaysState, relay1_clr);
+	//SendTelemetryRelay1();
+}
+
+/// <summary>
+/// Check if relay #1 is not already open.
+/// Check if still in grace period.
+/// Check if moisture sensor #1 is below configured threshold;
+/// Check if moisture sensor #3 is above configured threshold;
+/// open relay #1 for configured number of seconds.
+/// </summary>
+static void PulseRelay1(void) 
+{
+	// Pulse already in progress?
+	if (!relaystate(relaysState, relay1_rd)) {
+		struct timespec pulse1DurationSeconds = { 3, 0 };
+		SetTimerFdToSingleExpiry(pulse1OneShotTimerFd, &pulse1DurationSeconds);
+		if (pulse1OneShotTimerFd > 0) {
+			// Water tank empty?
+			if (GetCapacitance(moistureSensors[2]) > 300) {
+				// Plant 1 dry?
+				if (GetCapacitance(moistureSensors[0]) < 400) {
+					// Set up pulse 1 duration
+					relaystate(relaysState, relay1_set);
+					SendTelemetryRelay1();
+				}
+			}
+		}
+	}
+}
+
+/// <summary>
+/// Turn on lamp using relay #2 if daytime.
+/// </summary>
+static void SwitchOnLampAtDayTime(void)
+{
+	
 }
 
 /// <summary>
 /// Azure timer event:  Check connection status and send telemetry
 /// </summary>
-static void AzureTimerEventHandler(EventData *eventData)
+static void AzureTimerEventHandler(EventData* eventData)
 {
-    if (ConsumeTimerFdEvent(azureTimerFd) != 0) {
-        terminationRequired = true;
-        return;
-    }
+	if (ConsumeTimerFdEvent(azureTimerFd) != 0) {
+		terminationRequired = true;
+		return;
+	}
 
-    bool isNetworkReady = false;
-    if (Networking_IsNetworkingReady(&isNetworkReady) != -1) {
-        if (isNetworkReady && !iothubAuthenticated) {
-            SetupAzureClient();
-        }
-    } else {
-        Log_Debug("Failed to get Network state\n");
-    }
+	bool isNetworkReady = false;
+	if (Networking_IsNetworkingReady(&isNetworkReady) != -1) {
+		if (isNetworkReady && !iothubAuthenticated) {
+			SetupAzureClient();
+		}
+	}
+	else {
+		Log_Debug("Failed to get Network state\n");
+	}
 
-    if (iothubAuthenticated) {
-        SendMoistureTelemetry();
-        IoTHubDeviceClient_LL_DoWork(iothubClientHandle);
-    }
+	if (iothubAuthenticated) {
+		SendTelemetryMoisture();
+		IoTHubDeviceClient_LL_DoWork(iothubClientHandle);
+	}
 }
-
-// event handler data structures. Only the event handler field needs to be populated.
-static EventData relay1PollEventData = { .eventHandler = &Relay1PollTimerEventHandler };
-static EventData buttonPollEventData = { .eventHandler = &ButtonPollTimerEventHandler };
-static EventData azureEventData = { .eventHandler = &AzureTimerEventHandler };
 
 /// <summary>
 ///     Set up SIGTERM termination handler, initialize peripherals, and set up event handlers.
@@ -326,16 +397,22 @@ static int InitPeripheralsAndHandlers(void)
 	InitializeSoilSensor(SoilMoistureI2cDefaultAddress2, true);
 	InitializeSoilSensor(WaterTankI2cDefaultAddress, true);
 	
-	DiagnoseMoistureSensors();
+	GetMoistureSensorsInfo();
 
-	// Uncomment to change address of sensor
+	// Uncomment to change address of sensor.
 	//ChangeSoilMoistureI2cAddress(SoilMoistureI2cDefaultAddress1, WaterTankI2cDefaultAddress);
 
 	relaysState = open_relay(SetRelayStates, InitializeRelays);
-	// Set up times to evaluate if relays should change state
+	// Set up relay check interval.
 	struct timespec relay1CheckPeriod = { Relay1DefaultPollPeriodSeconds, 0 };
-	relay1PollTimerFd = CreateTimerFdAndAddToEpoll(epollFd, &relay1CheckPeriod, &relay1PollEventData, EPOLLIN);
-	if (relay1PollTimerFd < 0) {
+	relayPollTimerFd = CreateTimerFdAndAddToEpoll(epollFd, &relay1CheckPeriod, &relayPollEventData, EPOLLIN);
+	if (relayPollTimerFd < 0) {
+		return -1;
+	}
+
+	// Set up a timer for pulse 1 one-shot.
+	pulse1OneShotTimerFd = CreateTimerFdAndAddToEpoll(epollFd, &nullPeriod, &pulse1EventData, EPOLLIN);
+	if (pulse1OneShotTimerFd < 0) {
 		return -1;
 	}
 
@@ -361,7 +438,7 @@ static int InitPeripheralsAndHandlers(void)
     return 0;
 }
 
-void DiagnoseMoistureSensors(void)
+void GetMoistureSensorsInfo(void)
 {
 	for (int i = 0; i < 3; i++)
 	{
@@ -587,8 +664,8 @@ static void ClosePeripheralsAndHandlers(void)
 	CloseFdAndPrintError(i2cFd, "I2C");
 	CloseFdAndPrintError(relay1PinFd, "Relay 1");
 	CloseFdAndPrintError(relay2PinFd, "Relay 2");
-	CloseFdAndPrintError(relay1PollTimerFd, "Relay 1");
-	CloseFdAndPrintError(relay2PollTimerFd, "Relay 2");
+	CloseFdAndPrintError(relayPollTimerFd, "Relay 1");
+	CloseFdAndPrintError(pulse1OneShotTimerFd, "Pulse 1");
 }
 
 /// <summary>
@@ -715,22 +792,43 @@ static void TwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsigned ch
         TwinReportBoolState("StatusLED", statusLedOn);
     }
 
-	// Relay 1
-	JSON_Object* Relay1State = json_object_dotget_object(desiredProperties, "Relay1Setting");
-	if (Relay1State != NULL) {
-		bool tempStatusRelay = (bool)json_object_get_boolean(Relay1State, "value");
+	// Relay 1 ON/OFF Setting
+	JSON_Object* Relay1StateSetting = json_object_dotget_object(desiredProperties, "Relay1Setting");
+	if (Relay1StateSetting != NULL) {
+		bool tempStatusRelay = (bool)json_object_get_boolean(Relay1StateSetting, "value");
 		relaystate(relaysState, tempStatusRelay ? relay1_set : relay1_clr);
 		TwinReportBoolState("Relay1Setting", relaystate(relaysState, relay1_rd));
 		SendTelemetryRelay1();
 	}
 
-	// Relay 1
-	JSON_Object* Relay2State = json_object_dotget_object(desiredProperties, "Relay2Setting");
-	if (Relay2State != NULL) {
-		bool tempStatusRelay = (bool)json_object_get_boolean(Relay2State, "value");
+	// Relay 2 ON/OFF Setting
+	JSON_Object* Relay2StateSetting = json_object_dotget_object(desiredProperties, "Relay2Setting");
+	if (Relay2StateSetting != NULL) {
+		bool tempStatusRelay = (bool)json_object_get_boolean(Relay2StateSetting, "value");
 		relaystate(relaysState, tempStatusRelay ? relay2_set : relay2_clr);
 		TwinReportBoolState("Relay2Setting", relaystate(relaysState, relay2_rd));
 		SendTelemetryRelay2();
+	}
+
+	size_t nullTerminatedJsonDateTimeSize = 24 + 1;
+	int jsonDateStartIndex = 11;
+
+	// Relay 2 ON time Setting
+	JSON_Object* Relay2OnTimeSetting = json_object_dotget_object(desiredProperties, "Relay2OnTimeSetting");
+	if (Relay2OnTimeSetting != NULL) {
+		//char* relay2OnTimeHourBuffer = (char*)malloc(2 + 1);
+		char relay2OnTimeHourBuffer[2 + 1] = "00";
+		char* nullTerminatedRelay2OnDateTime = (char*)malloc(nullTerminatedJsonDateTimeSize);
+		// Copy the provided buffer to a null terminated buffer.
+		memcpy(nullTerminatedRelay2OnDateTime, json_object_get_string(Relay2OnTimeSetting, "value"), nullTerminatedJsonDateTimeSize);
+		// Add the null terminator at the end.
+		nullTerminatedRelay2OnDateTime[nullTerminatedJsonDateTimeSize - 1] = 0;
+		memcpy(relay2OnTimeHourBuffer, &nullTerminatedRelay2OnDateTime[jsonDateStartIndex], 2);
+		relay2WorkingHoursOn = atoi(relay2OnTimeHourBuffer);
+		free(nullTerminatedRelay2OnDateTime);
+		free(relay2OnTimeHourBuffer);
+		EnableRelay2WorkingHours(relay2WorkingHoursOn, relay2WorkingHoursOff);
+		//TwinReportBoolState("Relay2OnTimeSetting", relaystate(relaysState, relay2_rd));
 	}
 
 cleanup:
@@ -738,6 +836,18 @@ cleanup:
     json_value_free(rootProperties);
     free(nullTerminatedJsonString);
 }
+
+static void EnableRelay2WorkingHours(int workingHoursOn, int workingHoursOff)
+{
+	// Should perform a lot of validation
+	relay2WorkingHoursOn = workingHoursOn;
+	relay2WorkingHoursOff = workingHoursOff;
+	
+	if (relay2WorkingHoursOn > -1 && relay2WorkingHoursOff > -1) {
+		relay2WorkingHoursInEffect = true;
+	}
+}
+
 static void SendTelemetryRelay1(void)
 {
 	SendTelemetry("Relay1State", relaystate(relaysState, relay1_rd) == 1 ? "On" : "Off");
@@ -917,10 +1027,8 @@ static void ReportStatusCallback(int result, void *context)
 /// <summary>
 ///     Collect sensor readings and send to IoT Central.
 /// </summary>
-void SendMoistureTelemetry(void)
+void SendTelemetryMoisture(void)
 {
-	
-
 	for (int i = 0; i < 3; i++)
 	{
 		float sensorTemperature = -1;

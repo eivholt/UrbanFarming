@@ -52,6 +52,7 @@
     <ClCompile Include="RelayClick\relay.c" />
     <ClCompile Include="SoilSensor\i2cAccess.c" />
     <ClCompile Include="SoilSensor\SoilMoistureI2cSensor.c" />
+    <ClCompile Include="time_utilities.c" />
     <ClInclude Include="azure_iot_utilities.h" />
     <ClInclude Include="epoll_timerfd_utilities.h" />
     <ClInclude Include="mt3620_avnet_dev.h" />
@@ -59,6 +60,7 @@
     <ClInclude Include="RelayClick\relay.h" />
     <ClInclude Include="SoilSensor\i2cAccess.h" />
     <ClInclude Include="SoilSensor\SoilMoistureI2cSensor.h" />
+    <ClInclude Include="time_utilities.h" />
     <UpToDateCheckInput Include="app_manifest.json" />
     <ClInclude Include="mt3620_rdb.h" />
   </ItemGroup>

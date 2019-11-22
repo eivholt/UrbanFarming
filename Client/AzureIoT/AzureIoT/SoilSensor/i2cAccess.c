@@ -1,5 +1,4 @@
 #include "i2cAccess.h"
-#include <applibs\i2c.h>
 
 void WriteI2CRegister8bit(I2C_DeviceAddress sensorAddress, const uint8_t* registerAddressAndValue) {
 	uint8_t buff[1];
