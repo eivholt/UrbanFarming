@@ -64,7 +64,7 @@ static const I2C_DeviceAddress SoilMoistureI2cDefaultAddress1 = 0x20;
 static const I2C_DeviceAddress SoilMoistureI2cDefaultAddress2 = 0x21;
 static const I2C_DeviceAddress WaterTankI2cDefaultAddress = 0x22;
 
-static const I2C_DeviceAddress moistureSensors[3] = 
+static const I2C_DeviceAddress moistureSensorsAddresses[3] = 
 { 
 	SoilMoistureI2cDefaultAddress1, 
 	SoilMoistureI2cDefaultAddress2, 
@@ -97,6 +97,7 @@ static int relay2WorkingHoursOn = -1;
 static int relay2WorkingMinutesOn = -1;
 static int relay2WorkingHoursOff = -1;
 static int relay2WorkingMinutesOff = -1;
+static int Relay1PulseSecondsSettingValue = 3;
 
 // Azure IoT Hub/Central defines.
 #define SCOPEID_LENGTH 20
@@ -276,7 +277,7 @@ static void RelayPollTimerEventHandler(EventData* eventData)
 		struct timespec currentTime;
 		struct tm* gmtTm;
 		clock_gettime(CLOCK_REALTIME, &currentTime);
-		gmtTm = gmtime(&currentTime.tv_sec);
+		gmtTm = localtime(&currentTime.tv_sec);
 		int currentGmtMinutes = MinutesFromHoursAndMinutes(&gmtTm->tm_hour, &gmtTm->tm_min);
 		int onTimeMinutes = MinutesFromHoursAndMinutes(&relay2WorkingHoursOn, &relay2WorkingMinutesOn);
 		int offTimeMinutes = MinutesFromHoursAndMinutes(&relay2WorkingHoursOff, &relay2WorkingMinutesOff);
@@ -306,8 +307,8 @@ static void Pulse1TimerEventHandler(EventData* eventData)
 	}
 
 	Log_Debug("Pulse1TimerEventHandler\n");
-	//relaystate(relaysState, relay1_clr);
-	//SendTelemetryRelay1();
+	relaystate(relaysState, relay1_clr);
+	SendTelemetryRelay1();
 }
 
 /// <summary>
@@ -321,16 +322,19 @@ static void PulseRelay1(void)
 {
 	// Pulse already in progress?
 	if (!relaystate(relaysState, relay1_rd)) {
-		struct timespec pulse1DurationSeconds = { 3, 0 };
+		struct timespec pulse1DurationSeconds = { Relay1PulseSecondsSettingValue, 0 };
 		SetTimerFdToSingleExpiry(pulse1OneShotTimerFd, &pulse1DurationSeconds);
 		if (pulse1OneShotTimerFd > 0) {
 			// Water tank empty?
-			if (GetCapacitance(moistureSensors[2]) > 300) {
-				// Plant 1 dry?
-				if (GetCapacitance(moistureSensors[0]) < 400) {
+			if (GetCapacitance(moistureSensorsAddresses[2]) > 300) {
+				// Plant 1 or 2 dry?
+				if ((GetCapacitance(moistureSensorsAddresses[0]) < 400)
+					|| (GetCapacitance(moistureSensorsAddresses[1]) < 400))
+				{
 					// Set up pulse 1 duration
 					relaystate(relaysState, relay1_set);
 					SendTelemetryRelay1();
+					return;
 				}
 			}
 		}
@@ -461,20 +465,6 @@ static int InitPeripheralsAndHandlers(void)
 	AzureIoT_SetDirectMethodCallback(&DirectMethodCall);
 
     return 0;
-}
-
-void GetMoistureSensorsInfo(void)
-{
-	for (int i = 0; i < 3; i++)
-	{
-		GetVersion(moistureSensors[i]);
-		GetAddress(moistureSensors[i]);
-
-		unsigned int soilSensor1Capacitance = GetCapacitance(moistureSensors[i]);
-		Log_Debug("Soil sensor (Address: %X) capacitance: %u\n", moistureSensors[i], soilSensor1Capacitance);
-		float soilSensor1Temperature = GetTemperature(moistureSensors[i]);
-		Log_Debug("Soil sensor (Address: %X) temperature: %.1f\n", moistureSensors[i], soilSensor1Temperature);
-	}
 }
 
 /// <summary>
@@ -706,14 +696,40 @@ static void HubConnectionStatusCallback(IOTHUB_CLIENT_CONNECTION_STATUS result,
 
 	if (iothubAuthenticated)
 	{
-		char soilsensor_version_string[10] = { 0 };
-		char soilsensor_address_string[10] = { 0 };
-		snprintf(soilsensor_version_string, 10, "0x%02X", GetVersion(SoilMoistureI2cDefaultAddress2));
-		snprintf(soilsensor_address_string, 10, "0x%02X", GetAddress(SoilMoistureI2cDefaultAddress2));
-		TwinReportStringState("SoilSensor2VersionProperty", soilsensor_version_string);
-		TwinReportStringState("SoilSensor2AddressProperty", soilsensor_address_string);
 		SendTelemetryRelay1();
 		SendTelemetryRelay2();
+
+		for (int i = 0; i < 3; i++)
+		{
+			char versionPropertyName[27];
+			char addressPropertyName[27];
+
+			snprintf(versionPropertyName, sizeof(versionPropertyName), "%s%d", "SoilSensorVersionProperty", i + 1);
+			snprintf(addressPropertyName, sizeof(addressPropertyName), "%s%d", "SoilSensorAddressProperty", i + 1);
+
+			char* version = malloc(5);
+			char* address = malloc(5);
+
+			snprintf(version, 5, "0x%02X", GetVersion(moistureSensorsAddresses[i]));
+			snprintf(address, 5, "0x%02X", GetAddress(moistureSensorsAddresses[i]));
+
+			TwinReportStringState(versionPropertyName, version);
+			TwinReportStringState(addressPropertyName, address);
+		}
+	}
+}
+
+void GetMoistureSensorsInfo(void)
+{
+	for (int i = 0; i < 3; i++)
+	{
+		GetVersion(moistureSensorsAddresses[i]);
+		GetAddress(moistureSensorsAddresses[i]);
+
+		unsigned int soilSensor1Capacitance = GetCapacitance(moistureSensorsAddresses[i]);
+		Log_Debug("Soil sensor (Address: %X) capacitance: %u\n", moistureSensorsAddresses[i], soilSensor1Capacitance);
+		float soilSensor1Temperature = GetTemperature(moistureSensorsAddresses[i]);
+		Log_Debug("Soil sensor (Address: %X) temperature: %.1f\n", moistureSensorsAddresses[i], soilSensor1Temperature);
 	}
 }
 
@@ -849,6 +865,15 @@ static void TwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsigned ch
 		ParseHourMinuteFromJson(Relay2OffTimeSetting, &relay2WorkingHoursOff, &relay2WorkingMinutesOff);
 		EnableRelay2WorkingHours();
 		TwinReportStringState("Relay2OffTimeSetting", json_object_get_string(Relay2OffTimeSetting, "value"));
+	}
+
+	// Relay 2 pulse duration seconds Setting
+	JSON_Object* Relay1PulseSecondsSetting = json_object_dotget_object(desiredProperties, "Relay1PulseSecondsSetting");
+	if (Relay1PulseSecondsSetting != NULL) {
+		Relay1PulseSecondsSettingValue = json_object_get_number(Relay1PulseSecondsSetting, "value");
+		char* relay1PulseSecondsSettingBuffer = malloc(3);
+		snprintf(relay1PulseSecondsSettingBuffer, sizeof(relay1PulseSecondsSettingBuffer), "%d", Relay1PulseSecondsSettingValue);
+		TwinReportStringState("Relay1PulseSecondsSetting", relay1PulseSecondsSettingBuffer);
 	}
 
 cleanup:
@@ -1084,16 +1109,16 @@ void SendTelemetryMoisture(void)
 		float sensorTemperature = -1;
 		unsigned int sensorCapacitance = 0;
 
-		if (IsBusy(moistureSensors[i])) 
+		if (IsBusy(moistureSensorsAddresses[i])) 
 		{
 				Log_Debug("Soil sensor is busy\n");
 		}
 		else {
-			sensorTemperature = GetTemperature(moistureSensors[i]);
-			Log_Debug("Soil sensor (Address: %X) temperature: %.1f\n", moistureSensors[i], sensorTemperature);
+			sensorTemperature = GetTemperature(moistureSensorsAddresses[i]);
+			Log_Debug("Soil sensor (Address: %X) temperature: %.1f\n", moistureSensorsAddresses[i], sensorTemperature);
 
-			sensorCapacitance = GetCapacitance(moistureSensors[i]);
-			Log_Debug("Soil sensor (Address: %X) capacitance: %u\n", moistureSensors[i], sensorCapacitance);
+			sensorCapacitance = GetCapacitance(moistureSensorsAddresses[i]);
+			Log_Debug("Soil sensor (Address: %X) capacitance: %u\n", moistureSensorsAddresses[i], sensorCapacitance);
 			if (sensorTemperature > -1) {
 				char tempBuffer[20] = { 0 };
 				int len = snprintf(tempBuffer, 20, "%3.1f", sensorTemperature);
