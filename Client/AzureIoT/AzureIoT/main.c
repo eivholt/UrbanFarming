@@ -98,6 +98,8 @@ static int relay2WorkingMinutesOn = -1;
 static int relay2WorkingHoursOff = -1;
 static int relay2WorkingMinutesOff = -1;
 static int Relay1PulseSecondsSettingValue = 3;
+static int Relay1PulseGraceSecondsSettingValue = 60;
+static bool relay1InGracePeriod = false;
 
 // Azure IoT Hub/Central defines.
 #define SCOPEID_LENGTH 20
@@ -143,6 +145,7 @@ static bool statusLedOn = false;
 // Timer / polling
 static int relayPollTimerFd = -1;
 static int pulse1OneShotTimerFd = -1;
+static int relay1GracePeriodTimerFd = -1;
 static int buttonPollTimerFd = -1;
 static int azureTimerFd = -1;
 static int epollFd = -1;
@@ -171,12 +174,14 @@ static bool deviceIsUp = false; // Orientation
 static void RelayPollTimerEventHandler(EventData* eventData);
 int MinutesFromHoursAndMinutes(int* hours, int* minutes);
 static void Pulse1TimerEventHandler(EventData* eventData);
+static void Relay1GracePeriodTimerEventHandler(EventData* eventData);
 static void ButtonPollTimerEventHandler(EventData* eventData);
 static void AzureTimerEventHandler(EventData *eventData);
 
 // Event handler data structures. Only the event handler field needs to be populated.
 static EventData relayPollEventData = { .eventHandler = &RelayPollTimerEventHandler };
 static EventData pulse1EventData = { .eventHandler = &Pulse1TimerEventHandler };
+static EventData relay1GracePeriodEventData = { .eventHandler = &Relay1GracePeriodTimerEventHandler };
 static EventData buttonPollEventData = { .eventHandler = &ButtonPollTimerEventHandler };
 static EventData azureEventData = { .eventHandler = &AzureTimerEventHandler };
 
@@ -272,24 +277,6 @@ static void RelayPollTimerEventHandler(EventData* eventData)
 	//Log_Debug("RelayPollTimerEventHandler\n");
 	PulseRelay1();
 	SwitchOnLampAtDayTime();
-	if (relay2WorkingHoursInEffect) {
-		
-		struct timespec currentTime;
-		struct tm* gmtTm;
-		clock_gettime(CLOCK_REALTIME, &currentTime);
-		gmtTm = localtime(&currentTime.tv_sec);
-		int currentGmtMinutes = MinutesFromHoursAndMinutes(&gmtTm->tm_hour, &gmtTm->tm_min);
-		int onTimeMinutes = MinutesFromHoursAndMinutes(&relay2WorkingHoursOn, &relay2WorkingMinutesOn);
-		int offTimeMinutes = MinutesFromHoursAndMinutes(&relay2WorkingHoursOff, &relay2WorkingMinutesOff);
-
-		if (currentGmtMinutes < onTimeMinutes
-			|| currentGmtMinutes >= offTimeMinutes) {
-			relaystate(relaysState, relay2_clr);
-		}
-		else {
-			relaystate(relaysState, relay2_set);
-		}
-	}
 }
 
 int MinutesFromHoursAndMinutes(int* hours, int* minutes) {
@@ -309,6 +296,26 @@ static void Pulse1TimerEventHandler(EventData* eventData)
 	Log_Debug("Pulse1TimerEventHandler\n");
 	relaystate(relaysState, relay1_clr);
 	SendTelemetryRelay1();
+	struct timespec relay1GracePeriodSeconds = { Relay1PulseGraceSecondsSettingValue, 0 };
+	SetTimerFdToSingleExpiry(relay1GracePeriodTimerFd, &relay1GracePeriodSeconds);
+	if (relay1GracePeriodTimerFd > 0)
+	{
+		relay1InGracePeriod = true;
+	}
+}
+
+/// <summary>
+/// Relay1 grace period timer event: Relay 1 grace period elapsed, allow new pulse.
+/// </summary>
+static void Relay1GracePeriodTimerEventHandler(EventData* eventData)
+{
+	if (ConsumeTimerFdEvent(relay1GracePeriodTimerFd) != 0) {
+		terminationRequired = true;
+		return;
+	}
+
+	Log_Debug("Relay1GracePeriodTimerEventHandler\n");
+	relay1InGracePeriod = false;
 }
 
 /// <summary>
@@ -320,18 +327,19 @@ static void Pulse1TimerEventHandler(EventData* eventData)
 /// </summary>
 static void PulseRelay1(void) 
 {
-	// Pulse already in progress?
-	if (!relaystate(relaysState, relay1_rd)) {
-		struct timespec pulse1DurationSeconds = { Relay1PulseSecondsSettingValue, 0 };
-		SetTimerFdToSingleExpiry(pulse1OneShotTimerFd, &pulse1DurationSeconds);
-		if (pulse1OneShotTimerFd > 0) {
-			// Water tank empty?
-			if (GetCapacitance(moistureSensorsAddresses[2]) > 300) {
-				// Plant 1 or 2 dry?
-				if ((GetCapacitance(moistureSensorsAddresses[0]) < 400)
-					|| (GetCapacitance(moistureSensorsAddresses[1]) < 400))
+	// Is in grace period or pulse already in progress?
+	if (!relay1InGracePeriod && !relaystate(relaysState, relay1_rd)) 
+	{
+		// Water tank empty?
+		if (GetCapacitance(moistureSensorsAddresses[2]) > 300) {
+			// Plant 1 or 2 dry?
+			if ((GetCapacitance(moistureSensorsAddresses[0]) < 400)
+				|| (GetCapacitance(moistureSensorsAddresses[1]) < 400))
+			{
+				struct timespec pulse1DurationSeconds = { Relay1PulseSecondsSettingValue, 0 };
+				SetTimerFdToSingleExpiry(pulse1OneShotTimerFd, &pulse1DurationSeconds);
+				if (pulse1OneShotTimerFd > 0)
 				{
-					// Set up pulse 1 duration
 					relaystate(relaysState, relay1_set);
 					SendTelemetryRelay1();
 					return;
@@ -346,7 +354,34 @@ static void PulseRelay1(void)
 /// </summary>
 static void SwitchOnLampAtDayTime(void)
 {
-	
+	if (relay2WorkingHoursInEffect) {
+
+		struct timespec currentTime;
+		struct tm* gmtTm;
+		clock_gettime(CLOCK_REALTIME, &currentTime);
+		gmtTm = localtime(&currentTime.tv_sec);
+		int currentGmtMinutes = MinutesFromHoursAndMinutes(&gmtTm->tm_hour, &gmtTm->tm_min);
+		int onTimeMinutes = MinutesFromHoursAndMinutes(&relay2WorkingHoursOn, &relay2WorkingMinutesOn);
+		int offTimeMinutes = MinutesFromHoursAndMinutes(&relay2WorkingHoursOff, &relay2WorkingMinutesOff);
+
+		// Is current clock before or after working hours?
+		if (currentGmtMinutes < onTimeMinutes
+			|| currentGmtMinutes >= offTimeMinutes) {
+			// Switch off if not already off.
+			if (relaystate(relaysState, relay2_rd)) 
+			{
+				relaystate(relaysState, relay2_clr);
+				SendTelemetryRelay2();
+			}
+			
+		}
+		// Between working hours, switch on if not already on.
+		else if(!relaystate(relaysState, relay2_rd))
+		{
+			relaystate(relaysState, relay2_set);
+			SendTelemetryRelay2();
+		}
+	}
 }
 
 /// <summary>
@@ -439,9 +474,15 @@ static int InitPeripheralsAndHandlers(void)
 		return -1;
 	}
 
-	// Set up a timer for pulse 1 one-shot.
+	// Set up a one-shot timer for pulse 1.
 	pulse1OneShotTimerFd = CreateTimerFdAndAddToEpoll(epollFd, &nullPeriod, &pulse1EventData, EPOLLIN);
 	if (pulse1OneShotTimerFd < 0) {
+		return -1;
+	}
+
+	// Set up a one-shot timer for realy 1 grace period.
+	relay1GracePeriodTimerFd = CreateTimerFdAndAddToEpoll(epollFd, &nullPeriod, &relay1GracePeriodEventData, EPOLLIN);
+	if (relay1GracePeriodTimerFd < 0) {
 		return -1;
 	}
 
@@ -681,6 +722,7 @@ static void ClosePeripheralsAndHandlers(void)
 	CloseFdAndPrintError(relay2PinFd, "Relay 2");
 	CloseFdAndPrintError(relayPollTimerFd, "Relay 1");
 	CloseFdAndPrintError(pulse1OneShotTimerFd, "Pulse 1");
+	CloseFdAndPrintError(relay1GracePeriodTimerFd, "Relay 1 Grace Period");
 }
 
 /// <summary>
@@ -867,13 +909,22 @@ static void TwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsigned ch
 		TwinReportStringState("Relay2OffTimeSetting", json_object_get_string(Relay2OffTimeSetting, "value"));
 	}
 
-	// Relay 2 pulse duration seconds Setting
+	// Relay 1 pulse duration seconds Setting
 	JSON_Object* Relay1PulseSecondsSetting = json_object_dotget_object(desiredProperties, "Relay1PulseSecondsSetting");
 	if (Relay1PulseSecondsSetting != NULL) {
-		Relay1PulseSecondsSettingValue = json_object_get_number(Relay1PulseSecondsSetting, "value");
+		Relay1PulseSecondsSettingValue = (int)json_object_get_number(Relay1PulseSecondsSetting, "value");
 		char* relay1PulseSecondsSettingBuffer = malloc(3);
-		snprintf(relay1PulseSecondsSettingBuffer, sizeof(relay1PulseSecondsSettingBuffer), "%d", Relay1PulseSecondsSettingValue);
+		snprintf(relay1PulseSecondsSettingBuffer, 2, "%d", Relay1PulseSecondsSettingValue);
 		TwinReportStringState("Relay1PulseSecondsSetting", relay1PulseSecondsSettingBuffer);
+	}
+
+	// Relay 1 pulse duration seconds Setting
+	JSON_Object* Relay1PulseGraceSecondsSetting = json_object_dotget_object(desiredProperties, "Relay1PulseGraceSecondsSetting");
+	if (Relay1PulseGraceSecondsSetting != NULL) {
+		Relay1PulseGraceSecondsSettingValue = (int)json_object_get_number(Relay1PulseGraceSecondsSetting, "value");
+		char* relay1PulseGraceSecondsSettingBuffer = malloc(7);
+		snprintf(relay1PulseGraceSecondsSettingBuffer, 6, "%d", Relay1PulseGraceSecondsSettingValue);
+		TwinReportStringState("Relay1PulseGraceSecondsSetting", relay1PulseGraceSecondsSettingBuffer);
 	}
 
 cleanup:
