@@ -98,7 +98,7 @@ static int relay2WorkingMinutesOn = -1;
 static int relay2WorkingHoursOff = -1;
 static int relay2WorkingMinutesOff = -1;
 static int Relay1PulseSecondsSettingValue = 3;
-static int Relay1PulseGraceSecondsSettingValue = 60;
+static int Relay1PulseGraceSecondsSettingValue = 5;
 static bool relay1InGracePeriod = false;
 
 // Azure IoT Hub/Central defines.
@@ -128,6 +128,7 @@ static void SendTelemetryMoisture(void);
 
 // Initialization/Cleanup
 static int InitPeripheralsAndHandlers(void);
+static void InitializeSoilMoistureSensors(void);
 static void GetMoistureSensorsInfo(void);
 static int DirectMethodCall(const char* methodName, const char* payload, size_t payloadSize, char** responsePayload, size_t* responsePayloadSize);
 static void InitializeRelays(void);
@@ -275,8 +276,11 @@ static void RelayPollTimerEventHandler(EventData* eventData)
 	}
 
 	//Log_Debug("RelayPollTimerEventHandler\n");
-	PulseRelay1();
-	SwitchOnLampAtDayTime();
+	if (iothubAuthenticated) 
+	{
+		PulseRelay1();
+		SwitchOnLampAtDayTime();
+	}
 }
 
 int MinutesFromHoursAndMinutes(int* hours, int* minutes) {
@@ -333,8 +337,8 @@ static void PulseRelay1(void)
 		// Water tank empty?
 		if (GetCapacitance(moistureSensorsAddresses[2]) > 300) {
 			// Plant 1 or 2 dry?
-			if ((GetCapacitance(moistureSensorsAddresses[0]) < 400)
-				|| (GetCapacitance(moistureSensorsAddresses[1]) < 400))
+			if ((GetCapacitance(moistureSensorsAddresses[0]) < 300)
+				|| (GetCapacitance(moistureSensorsAddresses[1]) < 300))
 			{
 				struct timespec pulse1DurationSeconds = { Relay1PulseSecondsSettingValue, 0 };
 				SetTimerFdToSingleExpiry(pulse1OneShotTimerFd, &pulse1DurationSeconds);
@@ -457,9 +461,7 @@ static int InitPeripheralsAndHandlers(void)
 	I2CMaster_SetBusSpeed(i2cFd, I2C_BUS_SPEED_STANDARD);
 	I2CMaster_SetTimeout(i2cFd, 100);
 
-	InitializeSoilSensor(SoilMoistureI2cDefaultAddress1, true);
-	InitializeSoilSensor(SoilMoistureI2cDefaultAddress2, true);
-	InitializeSoilSensor(WaterTankI2cDefaultAddress, true);
+	InitializeSoilMoistureSensors();
 	
 	GetMoistureSensorsInfo();
 
@@ -506,6 +508,13 @@ static int InitPeripheralsAndHandlers(void)
 	AzureIoT_SetDirectMethodCallback(&DirectMethodCall);
 
     return 0;
+}
+
+void InitializeSoilMoistureSensors(void)
+{
+	InitializeSoilSensor(SoilMoistureI2cDefaultAddress1, true);
+	InitializeSoilSensor(SoilMoistureI2cDefaultAddress2, true);
+	InitializeSoilSensor(WaterTankI2cDefaultAddress, true);
 }
 
 /// <summary>
@@ -1160,16 +1169,38 @@ void SendTelemetryMoisture(void)
 		float sensorTemperature = -1;
 		unsigned int sensorCapacitance = 0;
 
-		if (IsBusy(moistureSensorsAddresses[i])) 
+		// Only read sensors when motor is idle. The motor generates a lot of noise, see project description.
+		if (!relaystate(relaysState, relay1_rd))
 		{
+			if (IsBusy(moistureSensorsAddresses[i]))
+			{
 				Log_Debug("Soil sensor is busy\n");
-		}
-		else {
-			sensorTemperature = GetTemperature(moistureSensorsAddresses[i]);
-			Log_Debug("Soil sensor (Address: %X) temperature: %.1f\n", moistureSensorsAddresses[i], sensorTemperature);
+			}
+			else {
+				sensorTemperature = GetTemperature(moistureSensorsAddresses[i]);
+				if (sensorTemperature > 1000) {
+					// Must be false reading, restart sensor.
+					Log_Debug("ERROR: Soil sensor (Address: %X) temperature: %.1f\n", moistureSensorsAddresses[i], sensorTemperature);
+					terminationRequired = true;
+					return;
+				}
+				Log_Debug("Soil sensor (Address: %X) temperature: %.1f\n", moistureSensorsAddresses[i], sensorTemperature);
+			}
+			if (IsBusy(moistureSensorsAddresses[i]))
+			{
+				Log_Debug("Soil sensor is busy\n");
+			}
+			else {
+				sensorCapacitance = GetCapacitance(moistureSensorsAddresses[i]);
+				if (sensorCapacitance > 1000) {
+					// Must be false reading, restart sensor.
+					Log_Debug("ERROR: Soil sensor (Address: %X) temperature: %.1f\n", moistureSensorsAddresses[i], sensorTemperature);
+					terminationRequired = true;
+					return;
+				}
+				Log_Debug("Soil sensor (Address: %X) capacitance: %u\n", moistureSensorsAddresses[i], sensorCapacitance);
+			}
 
-			sensorCapacitance = GetCapacitance(moistureSensorsAddresses[i]);
-			Log_Debug("Soil sensor (Address: %X) capacitance: %u\n", moistureSensorsAddresses[i], sensorCapacitance);
 			if (sensorTemperature > -1) {
 				char tempBuffer[20] = { 0 };
 				int len = snprintf(tempBuffer, 20, "%3.1f", sensorTemperature);
@@ -1183,6 +1214,9 @@ void SendTelemetryMoisture(void)
 				if (len > 0)
 					SendTelemetry(capacitanceSensorNames[i], tempBuffer);
 			}
+		}
+		else {
+			Log_Debug("Relay 1 is busy\n");
 		}
 	}
 }
