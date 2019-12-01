@@ -97,8 +97,8 @@ static int relay2WorkingHoursOn = -1;
 static int relay2WorkingMinutesOn = -1;
 static int relay2WorkingHoursOff = -1;
 static int relay2WorkingMinutesOff = -1;
-static int Relay1PulseSecondsSettingValue = 3;
-static int Relay1PulseGraceSecondsSettingValue = 5;
+static int Relay1PulseSecondsSettingValue = 1;
+static int Relay1PulseGraceSecondsSettingValue = -1;
 static bool relay1InGracePeriod = false;
 
 // Azure IoT Hub/Central defines.
@@ -169,6 +169,7 @@ static void SendMessageButtonHandler(void);
 static void SendOrientationButtonHandler(void);
 static void ChangeSoilMoistureI2cAddress(I2C_DeviceAddress originAddress, I2C_DeviceAddress desiredAddress);
 static void PulseRelay1(void);
+static bool HasRelay1PulseGraceSecondsSettingValueBeenUpdated(void);
 static void SwitchOnLampAtDayTime(void);
 static bool deviceIsUp = false; // Orientation
 
@@ -325,14 +326,15 @@ static void Relay1GracePeriodTimerEventHandler(EventData* eventData)
 /// <summary>
 /// Check if relay #1 is not already open.
 /// Check if still in grace period.
-/// Check if moisture sensor #1 is below configured threshold;
-/// Check if moisture sensor #3 is above configured threshold;
-/// open relay #1 for configured number of seconds.
+/// Check if moisture sensor #1 or #2 is below configured threshold, i.e. soil is dry;
+/// Check if moisture sensor #3 is above configured threshold, i.e. water tank is not empty;
+/// Open relay #1 for configured number of seconds.
+/// Send telemetry.
 /// </summary>
 static void PulseRelay1(void) 
 {
 	// Is in grace period or pulse already in progress?
-	if (!relay1InGracePeriod && !relaystate(relaysState, relay1_rd)) 
+	if (!relay1InGracePeriod && !relaystate(relaysState, relay1_rd)  && HasRelay1PulseGraceSecondsSettingValueBeenUpdated())
 	{
 		// Water tank empty?
 		if (GetCapacitance(moistureSensorsAddresses[2]) > 300) {
@@ -351,6 +353,13 @@ static void PulseRelay1(void)
 			}
 		}
 	}
+}
+
+/// <summary>
+/// Wait for setting to be updated from IoT Central.
+/// </summary>
+static bool HasRelay1PulseGraceSecondsSettingValueBeenUpdated(void) {
+	return Relay1PulseGraceSecondsSettingValue > -1;
 }
 
 /// <summary>
@@ -754,16 +763,12 @@ static void HubConnectionStatusCallback(IOTHUB_CLIENT_CONNECTION_STATUS result,
 		{
 			char versionPropertyName[27];
 			char addressPropertyName[27];
-
 			snprintf(versionPropertyName, sizeof(versionPropertyName), "%s%d", "SoilSensorVersionProperty", i + 1);
 			snprintf(addressPropertyName, sizeof(addressPropertyName), "%s%d", "SoilSensorAddressProperty", i + 1);
-
 			char* version = malloc(5);
 			char* address = malloc(5);
-
 			snprintf(version, 5, "0x%02X", GetVersion(moistureSensorsAddresses[i]));
 			snprintf(address, 5, "0x%02X", GetAddress(moistureSensorsAddresses[i]));
-
 			TwinReportStringState(versionPropertyName, version);
 			TwinReportStringState(addressPropertyName, address);
 		}
