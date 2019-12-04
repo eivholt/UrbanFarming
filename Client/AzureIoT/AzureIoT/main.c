@@ -100,6 +100,8 @@ static int relay2WorkingMinutesOff = -1;
 static int Relay1PulseSecondsSettingValue = 1;
 static int Relay1PulseGraceSecondsSettingValue = -1;
 static bool relay1InGracePeriod = false;
+static int SoilMoistureCapacitanceThresholdSettingValue = -1;
+static int WaterTankCapacitanceThresholdSettingValue = -1;
 
 // Azure IoT Hub/Central defines.
 #define SCOPEID_LENGTH 20
@@ -170,6 +172,8 @@ static void SendOrientationButtonHandler(void);
 static void ChangeSoilMoistureI2cAddress(I2C_DeviceAddress originAddress, I2C_DeviceAddress desiredAddress);
 static void PulseRelay1(void);
 static bool HasRelay1PulseGraceSecondsSettingValueBeenUpdated(void);
+static bool HasSoilMoistureCapacitanceThresholdSettingValueBeenUpdated(void);
+static bool HasWaterTankCapacitanceThresholdSettingValueBeenUpdated(void);
 static void SwitchOnLampAtDayTime(void);
 static bool deviceIsUp = false; // Orientation
 
@@ -334,13 +338,17 @@ static void Relay1GracePeriodTimerEventHandler(EventData* eventData)
 static void PulseRelay1(void) 
 {
 	// Is in grace period or pulse already in progress?
-	if (!relay1InGracePeriod && !relaystate(relaysState, relay1_rd)  && HasRelay1PulseGraceSecondsSettingValueBeenUpdated())
+	if (!relay1InGracePeriod 
+		&& !relaystate(relaysState, relay1_rd) 
+		&& HasRelay1PulseGraceSecondsSettingValueBeenUpdated()
+		&& HasSoilMoistureCapacitanceThresholdSettingValueBeenUpdated()
+		&& HasWaterTankCapacitanceThresholdSettingValueBeenUpdated())
 	{
 		// Water tank empty?
-		if (GetCapacitance(moistureSensorsAddresses[2]) > 300) {
+		if (GetCapacitance(moistureSensorsAddresses[2]) > WaterTankCapacitanceThresholdSettingValue) {
 			// Plant 1 or 2 dry?
-			if ((GetCapacitance(moistureSensorsAddresses[0]) < 300)
-				|| (GetCapacitance(moistureSensorsAddresses[1]) < 300))
+			if ((GetCapacitance(moistureSensorsAddresses[0]) < SoilMoistureCapacitanceThresholdSettingValue)
+				|| (GetCapacitance(moistureSensorsAddresses[1]) < SoilMoistureCapacitanceThresholdSettingValue))
 			{
 				struct timespec pulse1DurationSeconds = { Relay1PulseSecondsSettingValue, 0 };
 				SetTimerFdToSingleExpiry(pulse1OneShotTimerFd, &pulse1DurationSeconds);
@@ -360,6 +368,20 @@ static void PulseRelay1(void)
 /// </summary>
 static bool HasRelay1PulseGraceSecondsSettingValueBeenUpdated(void) {
 	return Relay1PulseGraceSecondsSettingValue > -1;
+}
+
+/// <summary>
+/// Wait for setting to be updated from IoT Central.
+/// </summary>
+static bool HasSoilMoistureCapacitanceThresholdSettingValueBeenUpdated(void) {
+	return SoilMoistureCapacitanceThresholdSettingValue > -1;
+}
+
+/// <summary>
+/// Wait for setting to be updated from IoT Central.
+/// </summary>
+static bool HasWaterTankCapacitanceThresholdSettingValueBeenUpdated(void) {
+	return WaterTankCapacitanceThresholdSettingValue > -1;
 }
 
 /// <summary>
@@ -939,6 +961,24 @@ static void TwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsigned ch
 		char* relay1PulseGraceSecondsSettingBuffer = malloc(7);
 		snprintf(relay1PulseGraceSecondsSettingBuffer, 6, "%d", Relay1PulseGraceSecondsSettingValue);
 		TwinReportStringState("Relay1PulseGraceSecondsSetting", relay1PulseGraceSecondsSettingBuffer);
+	}
+
+	// Soil moisture threshold Setting
+	JSON_Object* SoilMoistureCapacitanceThresholdSetting = json_object_dotget_object(desiredProperties, "SoilMoistureCapacitanceThresholdSetting");
+	if (SoilMoistureCapacitanceThresholdSetting != NULL) {
+		SoilMoistureCapacitanceThresholdSettingValue = (int)json_object_get_number(SoilMoistureCapacitanceThresholdSetting, "value");
+		char* soilMoistureCapacitanceThresholdSettingBuffer = malloc(7);
+		snprintf(soilMoistureCapacitanceThresholdSettingBuffer, 6, "%d", SoilMoistureCapacitanceThresholdSettingValue);
+		TwinReportStringState("SoilMoistureCapacitanceThresholdSetting", soilMoistureCapacitanceThresholdSettingBuffer);
+	}
+
+	// Water tank threshold Setting
+	JSON_Object* WaterTankCapacitanceThresholdSetting = json_object_dotget_object(desiredProperties, "WaterTankCapacitanceThresholdSetting");
+	if (WaterTankCapacitanceThresholdSetting != NULL) {
+		WaterTankCapacitanceThresholdSettingValue = (int)json_object_get_number(WaterTankCapacitanceThresholdSetting, "value");
+		char* waterTankCapacitanceThresholdSettingBuffer = malloc(7);
+		snprintf(waterTankCapacitanceThresholdSettingBuffer, 6, "%d", WaterTankCapacitanceThresholdSettingValue);
+		TwinReportStringState("WaterTankCapacitanceThresholdSetting", waterTankCapacitanceThresholdSettingBuffer);
 	}
 
 cleanup:
