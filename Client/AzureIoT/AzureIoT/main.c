@@ -131,6 +131,8 @@ static void SendTelemetryMoisture(void);
 // Initialization/Cleanup
 static int InitPeripheralsAndHandlers(void);
 static void InitializeSoilMoistureSensors(void);
+static void HubConnectionStatusCallback(IOTHUB_CLIENT_CONNECTION_STATUS result, IOTHUB_CLIENT_CONNECTION_STATUS_REASON reason, void* userContextCallback);
+static void SendDeviceAuthenticatedEvent(void);
 static void GetMoistureSensorsInfo(void);
 static int DirectMethodCall(const char* methodName, const char* payload, size_t payloadSize, char** responsePayload, size_t* responsePayloadSize);
 static void InitializeRelays(void);
@@ -355,6 +357,7 @@ static void PulseRelay1(void)
 				if (pulse1OneShotTimerFd > 0)
 				{
 					relaystate(relaysState, relay1_set);
+					SendTelemetry("WaterEvent", "True");
 					SendTelemetryRelay1();
 					return;
 				}
@@ -406,6 +409,7 @@ static void SwitchOnLampAtDayTime(void)
 			if (relaystate(relaysState, relay2_rd)) 
 			{
 				relaystate(relaysState, relay2_clr);
+				SendTelemetry("LightOffEvent", "True");
 				SendTelemetryRelay2();
 			}
 			
@@ -414,6 +418,7 @@ static void SwitchOnLampAtDayTime(void)
 		else if(!relaystate(relaysState, relay2_rd))
 		{
 			relaystate(relaysState, relay2_set);
+			SendTelemetry("LightOnEvent", "True");
 			SendTelemetryRelay2();
 		}
 	}
@@ -674,7 +679,7 @@ static int DirectMethodCall(const char* methodName, const char* payload, size_t 
 				*responsePayloadSize = strlen(*responsePayload);
 
 				// Define a new timespec variable for the timer and change the timer period
-				struct timespec newAccelReadPeriod = { .tv_sec = relay2PulseSeconds,.tv_nsec = 0 };
+				//struct timespec newAccelReadPeriod = { .tv_sec = relay2PulseSeconds,.tv_nsec = 0 };
 				//SetTimerFdToPeriod(accelTimerFd, &newAccelReadPeriod);
 				return result;
 			}
@@ -778,6 +783,7 @@ static void HubConnectionStatusCallback(IOTHUB_CLIENT_CONNECTION_STATUS result,
 
 	if (iothubAuthenticated)
 	{
+		SendDeviceAuthenticatedEvent();
 		SendTelemetryRelay1();
 		SendTelemetryRelay2();
 
@@ -795,6 +801,10 @@ static void HubConnectionStatusCallback(IOTHUB_CLIENT_CONNECTION_STATUS result,
 			TwinReportStringState(addressPropertyName, address);
 		}
 	}
+}
+
+static void SendDeviceAuthenticatedEvent(void) {
+	SendTelemetry("DeviceAuthenticatedEvent", "True"); 
 }
 
 void GetMoistureSensorsInfo(void)
@@ -915,7 +925,12 @@ static void TwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsigned ch
 	JSON_Object* Relay1StateSetting = json_object_dotget_object(desiredProperties, "Relay1Setting");
 	if (Relay1StateSetting != NULL) {
 		bool tempStatusRelay = (bool)json_object_get_boolean(Relay1StateSetting, "value");
-		relaystate(relaysState, tempStatusRelay ? relay1_set : relay1_clr);
+		
+		if (tempStatusRelay != relaystate(relaysState, relay1_rd)) {
+			relaystate(relaysState, tempStatusRelay ? relay1_set : relay1_clr);
+			SendTelemetry(relaystate(relaysState, relay1_rd) == 1 ? "WaterOnEvent" : "WaterOffEvent", "True");
+		}	
+
 		TwinReportBoolState("Relay1Setting", relaystate(relaysState, relay1_rd));
 		SendTelemetryRelay1();
 	}
@@ -924,7 +939,12 @@ static void TwinCallback(DEVICE_TWIN_UPDATE_STATE updateState, const unsigned ch
 	JSON_Object* Relay2StateSetting = json_object_dotget_object(desiredProperties, "Relay2Setting");
 	if (Relay2StateSetting != NULL) {
 		bool tempStatusRelay = (bool)json_object_get_boolean(Relay2StateSetting, "value");
-		relaystate(relaysState, tempStatusRelay ? relay2_set : relay2_clr);
+		
+		if (tempStatusRelay != relaystate(relaysState, relay2_rd)) {
+			relaystate(relaysState, tempStatusRelay ? relay2_set : relay2_clr);
+			SendTelemetry(relaystate(relaysState, relay2_rd) == 1 ? "LightOnEvent" : "LightOffEvent", "True");
+		}
+
 		TwinReportBoolState("Relay2Setting", relaystate(relaysState, relay2_rd));
 		SendTelemetryRelay2();
 	}
