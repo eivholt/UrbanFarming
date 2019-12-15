@@ -1,0 +1,7 @@
+{
+    "board": "Talk2:avr:whispernode",
+    "configuration": "mhz=16MHz",
+    "port": "COM12",
+    "programmer": "AVR ISP",
+    "sketch": "WhisperNodeChirp.ino"
+}

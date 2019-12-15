@@ -1,0 +1,7 @@
+{
+    "port": "COM12",
+    "board": "Talk2:avr:whispernode",
+    "configuration": "mhz=16MHz",
+    "programmer": "USBtinyISP",
+    "sketch": "WhisperNodeLoRaWANChirp.ino"
+}
